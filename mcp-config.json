@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/anthropic-quickstarts/main/mcp-schema.json",
+  "mcpServers": {
+    "java-patching": {
+      "command": "python",
+      "args": ["backend/mcp_server.py"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/backend"
+      }
+    }
+  }
+}
