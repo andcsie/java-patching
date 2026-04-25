@@ -1,8 +1,8 @@
 """Service for fetching and parsing JDK release notes."""
 
+import logging
 import re
 from dataclasses import dataclass
-from functools import lru_cache
 
 import httpx
 from bs4 import BeautifulSoup
@@ -31,7 +31,8 @@ class ReleaseNotesService:
     """Service for fetching JDK release notes from various sources."""
 
     def __init__(self):
-        self.client = httpx.AsyncClient(timeout=30.0)
+        # Reduced timeout to prevent long waits when APIs are slow/unreachable
+        self.client = httpx.AsyncClient(timeout=5.0)
         self._change_cache: dict[str, list[JDKChange]] = {}
 
     async def close(self):
@@ -44,32 +45,41 @@ class ReleaseNotesService:
         to_version: str,
     ) -> list[JDKChange]:
         """Get all changes between two JDK versions."""
+        logging.info(f"[ReleaseNotes] Getting changes: {from_version} -> {to_version}")
+
         # Parse version numbers
         from_parts = self._parse_version(from_version)
         to_parts = self._parse_version(to_version)
 
         if from_parts is None or to_parts is None:
+            logging.warning(f"[ReleaseNotes] Invalid version format")
             return []
 
-        # Only support same major version upgrades
+        # Only support same major version upgrades for patch analysis
         if from_parts[0] != to_parts[0]:
+            logging.warning(f"[ReleaseNotes] Cross-major upgrades not supported")
             return []
 
         major_version = from_parts[0]
+        from_patch = from_parts[2] if len(from_parts) > 2 else from_parts[1]
+        to_patch = to_parts[2] if len(to_parts) > 2 else to_parts[1]
+
         all_changes: list[JDKChange] = []
 
-        # Get changes for each minor version in between
-        current_minor = from_parts[1]
-        target_minor = to_parts[1]
+        # Get changes for each patch version in between
+        current_patch = from_patch + 1
+        while current_patch <= to_patch:
+            version_str = f"{major_version}.0.{current_patch}"
+            logging.info(f"[ReleaseNotes] Fetching changes for {version_str}")
 
-        while current_minor < target_minor:
-            next_minor = current_minor + 1
-            version_str = f"{major_version}.0.{next_minor}"
-
+            # Fetch from APIs
             changes = await self._get_version_changes(version_str)
+            logging.info(f"[ReleaseNotes] Got {len(changes)} changes for {version_str}")
             all_changes.extend(changes)
-            current_minor = next_minor
 
+            current_patch += 1
+
+        logging.info(f"[ReleaseNotes] Total changes found: {len(all_changes)}")
         return all_changes
 
     def _parse_version(self, version: str) -> tuple[int, int, int] | None:
@@ -99,243 +109,150 @@ class ReleaseNotesService:
         return changes
 
     async def _fetch_openjdk_changes(self, version: str) -> list[JDKChange]:
-        """Fetch changes from OpenJDK release notes."""
+        """Fetch changes from Oracle JDK release notes."""
         changes: list[JDKChange] = []
-        major = version.split(".")[0]
 
-        # OpenJDK release notes URL pattern
-        url = f"https://openjdk.org/projects/jdk-updates/{major}u/jdk-{version}-release-notes"
+        # Oracle release notes URL pattern (e.g., 11-0-22-relnotes.html)
+        version_dashed = version.replace(".", "-")
+        url = f"https://www.oracle.com/java/technologies/javase/{version_dashed}-relnotes.html"
 
+        logging.info(f"[ReleaseNotes] Fetching Oracle: {url}")
         try:
             response = await self.client.get(url, follow_redirects=True)
+            logging.info(f"[ReleaseNotes] Oracle response: {response.status_code}")
             if response.status_code != 200:
                 return changes
 
-            soup = BeautifulSoup(response.text, "lxml")
+            soup = BeautifulSoup(response.text, "html.parser")
 
-            # Parse security fixes
-            security_section = soup.find(string=re.compile("Security", re.I))
-            if security_section:
-                parent = security_section.find_parent()
-                if parent:
-                    security_changes = self._parse_security_section(parent, version)
-                    changes.extend(security_changes)
+            # Parse security-libs changes
+            for div in soup.find_all("div"):
+                text = div.get_text()
+                if "security-libs" in text.lower():
+                    # Find the parent section for context
+                    parent = div.find_parent("div") or div.find_parent("td")
+                    if parent:
+                        full_text = parent.get_text()
+                        component = self._extract_component(full_text)
+                        affected_classes = self._extract_class_names(full_text)
 
-            # Parse bug fixes
-            bugfix_section = soup.find(string=re.compile("Bug Fixes", re.I))
-            if bugfix_section:
-                parent = bugfix_section.find_parent()
-                if parent:
-                    bugfix_changes = self._parse_bugfix_section(parent, version)
-                    changes.extend(bugfix_changes)
+                        # Look for JDK bug link
+                        bug_link = parent.find("a", href=re.compile(r"JDK-\d+"))
+                        bug_id = None
+                        if bug_link:
+                            match = re.search(r"JDK-\d+", bug_link.get("href", ""))
+                            if match:
+                                bug_id = match.group()
 
-            # Parse deprecated/removed APIs
-            api_section = soup.find(string=re.compile("Deprecated|Removed", re.I))
-            if api_section:
-                parent = api_section.find_parent()
-                if parent:
-                    api_changes = self._parse_api_changes(parent, version)
-                    changes.extend(api_changes)
+                        changes.append(
+                            JDKChange(
+                                version=version,
+                                change_type=ChangeType.SECURITY,
+                                component=component,
+                                description=full_text[:500].strip(),
+                                affected_classes=affected_classes,
+                                affected_methods=[],
+                                bug_id=bug_id,
+                            )
+                        )
 
-        except Exception:
-            # Log error but continue
-            pass
+            # Parse Bug Fixes section
+            bugfix_headers = soup.find_all(string=re.compile(r"Bug\s*Fix", re.I))
+            for header in bugfix_headers:
+                table = header.find_next("table")
+                if table:
+                    for row in table.find_all("tr")[1:]:  # Skip header row
+                        cells = row.find_all("td")
+                        if len(cells) >= 2:
+                            bug_link = cells[0].find("a")
+                            bug_id = bug_link.get_text().strip() if bug_link else None
+                            description = cells[1].get_text().strip() if len(cells) > 1 else ""
+
+                            component = self._extract_component(description)
+                            affected_classes = self._extract_class_names(description)
+
+                            # Determine change type
+                            change_type = ChangeType.BUGFIX
+                            if any(kw in description.lower() for kw in ["behavior", "change", "now"]):
+                                change_type = ChangeType.BEHAVIORAL
+
+                            changes.append(
+                                JDKChange(
+                                    version=version,
+                                    change_type=change_type,
+                                    component=component,
+                                    description=description,
+                                    affected_classes=affected_classes,
+                                    affected_methods=[],
+                                    bug_id=bug_id,
+                                )
+                            )
+
+            # Parse CVE references
+            cve_pattern = re.compile(r"CVE-\d{4}-\d+")
+            for match in cve_pattern.finditer(soup.get_text()):
+                cve_id = match.group()
+                # Get context around CVE
+                text = soup.get_text()
+                start = max(0, match.start() - 200)
+                end = min(len(text), match.end() + 200)
+                context = text[start:end].strip()
+
+                # Avoid duplicate CVEs
+                if not any(c.cve_id == cve_id for c in changes):
+                    changes.append(
+                        JDKChange(
+                            version=version,
+                            change_type=ChangeType.SECURITY,
+                            component=self._extract_component(context),
+                            description=context,
+                            affected_classes=self._extract_class_names(context),
+                            affected_methods=[],
+                            cve_id=cve_id,
+                        )
+                    )
+
+        except Exception as e:
+            logging.warning(f"Failed to fetch Oracle release notes for {version}: {e}")
 
         return changes
 
     async def _fetch_adoptium_changes(self, version: str) -> list[JDKChange]:
-        """Fetch changes from Adoptium API."""
+        """Fetch release info from Adoptium API."""
         changes: list[JDKChange] = []
         major = version.split(".")[0]
 
-        url = f"{settings.adoptium_api_url}/info/release_notes/openjdk{major}"
+        # Get release info for the specific version
+        url = f"{settings.adoptium_api_url}/assets/version/{version}"
 
         try:
-            response = await self.client.get(url)
+            response = await self.client.get(url, params={"release_type": "ga"})
             if response.status_code != 200:
                 return changes
 
             data = response.json()
 
-            # Parse release notes from Adoptium format
-            for note in data.get("release_notes", []):
-                if note.get("version_data", {}).get("semver") == version:
-                    for item in note.get("release_items", []):
-                        change = self._parse_adoptium_item(item, version)
-                        if change:
-                            changes.append(change)
+            # Adoptium provides binary info, not detailed release notes
+            # But we can extract version metadata
+            for release in data if isinstance(data, list) else [data]:
+                release_name = release.get("release_name", "")
+                if release_name:
+                    changes.append(
+                        JDKChange(
+                            version=version,
+                            change_type=ChangeType.BUGFIX,
+                            component="core",
+                            description=f"Release: {release_name}",
+                            affected_classes=[],
+                            affected_methods=[],
+                            release_note_url=f"https://adoptium.net/temurin/release-notes/?version=jdk-{version}",
+                        )
+                    )
 
         except Exception:
             pass
 
         return changes
-
-    def _parse_security_section(
-        self,
-        section,
-        version: str,
-    ) -> list[JDKChange]:
-        """Parse security fixes from HTML section."""
-        changes: list[JDKChange] = []
-
-        # Find all list items or paragraphs with CVE references
-        cve_pattern = re.compile(r"CVE-\d{4}-\d+")
-        text = section.get_text()
-
-        for match in cve_pattern.finditer(text):
-            cve_id = match.group()
-
-            # Try to extract the surrounding description
-            start = max(0, match.start() - 200)
-            end = min(len(text), match.end() + 200)
-            context = text[start:end].strip()
-
-            # Extract affected component
-            component = self._extract_component(context)
-            affected_classes = self._extract_class_names(context)
-
-            changes.append(
-                JDKChange(
-                    version=version,
-                    change_type=ChangeType.SECURITY,
-                    component=component,
-                    description=context,
-                    affected_classes=affected_classes,
-                    affected_methods=[],
-                    cve_id=cve_id,
-                )
-            )
-
-        return changes
-
-    def _parse_bugfix_section(
-        self,
-        section,
-        version: str,
-    ) -> list[JDKChange]:
-        """Parse bug fixes from HTML section."""
-        changes: list[JDKChange] = []
-
-        # Find bug IDs (JDK-XXXXXXX format)
-        bug_pattern = re.compile(r"JDK-\d+")
-        text = section.get_text()
-
-        for match in bug_pattern.finditer(text):
-            bug_id = match.group()
-
-            # Extract description
-            start = match.end()
-            end = text.find("\n", start)
-            if end == -1:
-                end = min(len(text), start + 200)
-            description = text[start:end].strip(": \t")
-
-            component = self._extract_component(description)
-            affected_classes = self._extract_class_names(description)
-
-            # Determine if this is a behavioral change based on keywords
-            change_type = ChangeType.BUGFIX
-            if any(
-                keyword in description.lower()
-                for keyword in ["behavior", "behavioural", "changed", "now"]
-            ):
-                change_type = ChangeType.BEHAVIORAL
-
-            changes.append(
-                JDKChange(
-                    version=version,
-                    change_type=change_type,
-                    component=component,
-                    description=description,
-                    affected_classes=affected_classes,
-                    affected_methods=[],
-                    bug_id=bug_id,
-                )
-            )
-
-        return changes
-
-    def _parse_api_changes(
-        self,
-        section,
-        version: str,
-    ) -> list[JDKChange]:
-        """Parse deprecated/removed API changes."""
-        changes: list[JDKChange] = []
-        text = section.get_text()
-
-        # Look for class/method patterns
-        class_pattern = re.compile(
-            r"(java[x]?\.[a-zA-Z0-9_.]+(?:Class|Interface|[A-Z][a-zA-Z]+))"
-        )
-        method_pattern = re.compile(r"([a-zA-Z]+\.[a-zA-Z]+\([^)]*\))")
-
-        for match in class_pattern.finditer(text):
-            class_name = match.group(1)
-
-            # Determine if deprecated or removed
-            start = max(0, match.start() - 50)
-            context = text[start : match.end() + 50].lower()
-
-            if "removed" in context or "remove" in context:
-                change_type = ChangeType.REMOVED
-            else:
-                change_type = ChangeType.DEPRECATED
-
-            component = class_name.rsplit(".", 1)[0] if "." in class_name else "core"
-
-            changes.append(
-                JDKChange(
-                    version=version,
-                    change_type=change_type,
-                    component=component,
-                    description=text[start : match.end() + 100].strip(),
-                    affected_classes=[class_name],
-                    affected_methods=[],
-                )
-            )
-
-        return changes
-
-    def _parse_adoptium_item(self, item: dict, version: str) -> JDKChange | None:
-        """Parse a single release item from Adoptium API."""
-        title = item.get("title", "")
-        description = item.get("description", "")
-        link = item.get("link", "")
-
-        if not title:
-            return None
-
-        # Determine change type
-        change_type = ChangeType.BUGFIX
-        title_lower = title.lower()
-        if "security" in title_lower or "cve" in title_lower:
-            change_type = ChangeType.SECURITY
-        elif "deprecated" in title_lower:
-            change_type = ChangeType.DEPRECATED
-        elif "removed" in title_lower:
-            change_type = ChangeType.REMOVED
-        elif "behavior" in title_lower:
-            change_type = ChangeType.BEHAVIORAL
-
-        # Extract CVE if present
-        cve_match = re.search(r"CVE-\d{4}-\d+", title + description)
-        cve_id = cve_match.group() if cve_match else None
-
-        # Extract component and classes
-        component = self._extract_component(title + description)
-        affected_classes = self._extract_class_names(title + description)
-
-        return JDKChange(
-            version=version,
-            change_type=change_type,
-            component=component,
-            description=f"{title}\n{description}".strip(),
-            affected_classes=affected_classes,
-            affected_methods=[],
-            cve_id=cve_id,
-            release_note_url=link,
-        )
 
     def _extract_component(self, text: str) -> str:
         """Extract JDK component from text."""
@@ -370,52 +287,6 @@ class ReleaseNotesService:
         pattern = re.compile(r"\b((?:java|javax|jdk|sun)\.[a-zA-Z0-9_.]+[A-Z][a-zA-Z0-9]*)\b")
         matches = pattern.findall(text)
         return list(set(matches))
-
-
-# Well-known deprecated/removed APIs by JDK version for fallback
-KNOWN_CHANGES: dict[str, list[JDKChange]] = {
-    "11.0.19": [
-        JDKChange(
-            version="11.0.19",
-            change_type=ChangeType.SECURITY,
-            component="java.security",
-            description="TLS 1.0 and 1.1 disabled by default",
-            affected_classes=["javax.net.ssl.SSLSocket", "javax.net.ssl.SSLEngine"],
-            affected_methods=["setEnabledProtocols"],
-        ),
-    ],
-    "11.0.20": [
-        JDKChange(
-            version="11.0.20",
-            change_type=ChangeType.SECURITY,
-            component="java.security",
-            description="Strengthened certificate path validation",
-            affected_classes=["java.security.cert.PKIXValidator"],
-            affected_methods=[],
-        ),
-    ],
-    "17.0.6": [
-        JDKChange(
-            version="17.0.6",
-            change_type=ChangeType.DEPRECATED,
-            component="java.lang",
-            description="SecurityManager deprecated for removal",
-            affected_classes=["java.lang.SecurityManager"],
-            affected_methods=["checkPermission", "checkRead", "checkWrite"],
-            migration_notes="Migrate to alternative security mechanisms",
-        ),
-    ],
-    "21.0.1": [
-        JDKChange(
-            version="21.0.1",
-            change_type=ChangeType.BEHAVIORAL,
-            component="java.lang",
-            description="Virtual threads now handle thread-local variables differently",
-            affected_classes=["java.lang.ThreadLocal"],
-            affected_methods=["get", "set", "remove"],
-        ),
-    ],
-}
 
 
 # Global instance

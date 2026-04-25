@@ -87,6 +87,9 @@ export const repoApi = {
   pull: (id: string) => api.post(`/repositories/${id}/pull`),
 
   detectVersion: (id: string) => api.get(`/repositories/${id}/detect-version`),
+
+  scan: (scanPath?: string) =>
+    api.post('/repositories/scan', null, { params: { scan_path: scanPath } }),
 }
 
 // Impact Analysis
@@ -181,6 +184,59 @@ export const auditApi = {
 
   getRepositoryHistory: (repositoryId: string, limit?: number) =>
     api.get(`/audit/repository/${repositoryId}/history`, { params: { limit } }),
+}
+
+// Agents
+export const agentsApi = {
+  list: () => api.get('/agents'),
+
+  health: () => api.get('/agents/health'),
+
+  capabilities: () => api.get('/agents/capabilities'),
+
+  tools: () => api.get('/agents/tools'),
+
+  get: (agentName: string) => api.get(`/agents/${agentName}`),
+
+  getActions: (agentName: string) => api.get(`/agents/${agentName}/actions`),
+
+  getAction: (agentName: string, actionName: string) =>
+    api.get(`/agents/${agentName}/actions/${actionName}`),
+
+  execute: (agentName: string, actionName: string, params: {
+    parameters?: Record<string, unknown>
+    repository_id?: string
+  }) => api.post(`/agents/${agentName}/execute/${actionName}`, params),
+
+  executeByCapability: (capability: string, actionName: string, params: {
+    parameters?: Record<string, unknown>
+    repository_id?: string
+  }) => api.post(`/agents/execute-by-capability/${capability}?action_name=${actionName}`, params),
+}
+
+// Automation (Renovate-style)
+export const automationApi = {
+  getJdkVersion: (repositoryId: string) =>
+    api.get(`/automation/${repositoryId}/jdk-version`),
+
+  getAvailablePatches: (repositoryId: string) =>
+    api.get(`/automation/${repositoryId}/available-patches`),
+
+  previewBump: (repositoryId: string, targetVersion: string) =>
+    api.post(`/automation/${repositoryId}/preview-bump`, { target_version: targetVersion }),
+
+  applyBump: (repositoryId: string, targetVersion: string) =>
+    api.post(`/automation/${repositoryId}/apply-bump`, { target_version: targetVersion }),
+
+  generateRenovateConfig: (repositoryId: string, targetJdk?: string) =>
+    api.post(`/automation/${repositoryId}/generate-renovate-config`, null, {
+      params: { target_jdk: targetJdk },
+    }),
+
+  saveRenovateConfig: (repositoryId: string, targetJdk?: string) =>
+    api.post(`/automation/${repositoryId}/save-renovate-config`, null, {
+      params: { target_jdk: targetJdk },
+    }),
 }
 
 export default api

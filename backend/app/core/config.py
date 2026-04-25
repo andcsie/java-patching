@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     # Repository storage
     repos_base_path: str = "/app/repos"
 
+    # Folder to scan for repositories (auto-discovery)
+    repos_scan_path: str | None = None  # e.g., /path/to/projects
+
     # JDK Release Notes Sources
     openjdk_release_notes_url: str = "https://openjdk.org/projects/jdk-updates/"
     adoptium_api_url: str = "https://api.adoptium.net/v3"

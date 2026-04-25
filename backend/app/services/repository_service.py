@@ -83,6 +83,25 @@ class RepositoryService:
 
     async def clone(self, repo: Repository) -> str:
         """Clone a repository to local storage."""
+        # Check if URL is a local path (file:// or absolute path)
+        if repo.url.startswith("file://"):
+            local_path = repo.url[7:]  # Strip file://
+            if Path(local_path).exists():
+                repo.local_path = local_path
+                await self.db.commit()
+                return local_path
+            else:
+                raise ValueError(f"Local path does not exist: {local_path}")
+        elif repo.url.startswith("/"):
+            # Direct absolute path
+            if Path(repo.url).exists():
+                repo.local_path = repo.url
+                await self.db.commit()
+                return repo.url
+            else:
+                raise ValueError(f"Local path does not exist: {repo.url}")
+
+        # Regular git clone
         local_path = self.repos_base_path / str(repo.owner_id) / str(repo.id)
 
         # Ensure parent directory exists
@@ -253,3 +272,90 @@ class RepositoryService:
             pass
 
         return None
+
+    async def scan_and_discover(
+        self,
+        scan_path: Path,
+        owner_id: uuid.UUID,
+    ) -> list[Repository]:
+        """Scan a directory for Java projects and import them."""
+        discovered = []
+
+        if not scan_path.exists():
+            return discovered
+
+        # Look for directories containing pom.xml or build.gradle
+        for item in scan_path.iterdir():
+            if not item.is_dir():
+                continue
+
+            # Skip hidden directories
+            if item.name.startswith("."):
+                continue
+
+            # Check if it's a Java project
+            is_maven = (item / "pom.xml").exists()
+            is_gradle = (item / "build.gradle").exists() or (item / "build.gradle.kts").exists()
+
+            if not (is_maven or is_gradle):
+                continue
+
+            # Check if already imported (by local_path or by name)
+            result = await self.db.execute(
+                select(Repository)
+                .where(Repository.owner_id == owner_id)
+                .where(
+                    (Repository.local_path == str(item)) |
+                    (Repository.name == item.name)
+                )
+                .where(Repository.is_active == True)
+            )
+            existing = result.scalar_one_or_none()
+            if existing:
+                # Update local_path if not set
+                if not existing.local_path:
+                    existing.local_path = str(item)
+                    await self.db.commit()
+                discovered.append(existing)
+                continue
+
+            # Create new repository record
+            repo = Repository(
+                name=item.name,
+                url=str(item),
+                description=f"Auto-discovered from {scan_path}",
+                branch="main",
+                owner_id=owner_id,
+                local_path=str(item),
+            )
+            self.db.add(repo)
+            await self.db.commit()
+
+            # Reload from database to get all attributes
+            result = await self.db.execute(
+                select(Repository).where(Repository.id == repo.id)
+            )
+            repo = result.scalar_one()
+
+            # Try to detect JDK version
+            version = await self.detect_jdk_version(repo)
+            if version:
+                repo.current_jdk_version = version
+                # Set a sensible target version (latest patch of same major)
+                # e.g., 11.0.18 -> 11.0.22, 17.0.6 -> 17.0.10
+                parts = version.split(".")
+                if len(parts) >= 1:
+                    major = parts[0]
+                    # Default targets for common LTS versions
+                    targets = {"8": "8.0.402", "11": "11.0.22", "17": "17.0.10", "21": "21.0.2"}
+                    repo.target_jdk_version = targets.get(major, f"{major}.0.99")
+                await self.db.commit()
+                # Reload again
+                result = await self.db.execute(
+                    select(Repository).where(Repository.id == repo.id)
+                )
+                repo = result.scalar_one()
+
+            discovered.append(repo)
+
+        return discovered

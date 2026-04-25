@@ -270,6 +270,24 @@ For Claude Desktop, add to `~/.config/claude/claude_desktop_config.json`:
 
 ## Available Agents
 
+### Analysis Agent
+
+Best for: Understanding upgrade impact before making changes
+
+| Action | Description |
+|--------|-------------|
+| `get_release_notes` | Fetch JDK release notes between versions |
+| `analyze_impact` | Full AST-based impact analysis against release notes |
+| `get_security_advisories` | Get CVEs fixed between versions |
+| `suggest_upgrade_path` | Recommend upgrade strategy (patch vs major) |
+
+**How it works:**
+1. Fetches changes from OpenJDK/Adoptium release notes
+2. Parses Java files using tree-sitter AST
+3. Matches code usage against deprecated/removed APIs
+4. Calculates risk score and severity
+5. Uses LLM to generate migration suggestions
+
 ### Renovate Agent
 
 Best for: Patch-level upgrades within the same major version
@@ -302,6 +320,57 @@ Best for: Major version migrations (8→11, 11→17, 17→21)
 - `spring_boot_3` - Spring Boot 2.x → 3.0
 - `junit5` - JUnit 4 → 5 migration
 - `security_fixes` - OWASP security fixes
+
+## Agents API
+
+All agents can be invoked via the REST API:
+
+```bash
+# List all agents
+curl http://localhost:8000/api/agents
+
+# Get agent details
+curl http://localhost:8000/api/agents/analysis
+
+# List agent actions
+curl http://localhost:8000/api/agents/analysis/actions
+
+# Execute an action
+curl -X POST http://localhost:8000/api/agents/analysis/execute/analyze_impact \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repository_id": "uuid-here",
+    "parameters": {
+      "from_version": "11.0.18",
+      "to_version": "11.0.22"
+    }
+  }'
+
+# Health check all agents
+curl http://localhost:8000/api/agents/health
+
+# Get LLM tool definitions (for function calling)
+curl http://localhost:8000/api/agents/tools
+```
+
+### Automation API (Renovate-style shortcuts)
+
+```bash
+# Detect JDK version
+curl http://localhost:8000/api/automation/{repo_id}/jdk-version
+
+# Get available patches
+curl http://localhost:8000/api/automation/{repo_id}/available-patches
+
+# Preview version bump
+curl -X POST http://localhost:8000/api/automation/{repo_id}/preview-bump \
+  -d '{"target_version": "11.0.22"}'
+
+# Apply version bump
+curl -X POST http://localhost:8000/api/automation/{repo_id}/apply-bump \
+  -d '{"target_version": "11.0.22"}'
+```
 
 ## Development
 

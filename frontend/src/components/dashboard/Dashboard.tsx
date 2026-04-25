@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, RefreshCw } from 'lucide-react'
+import { Plus, RefreshCw, FolderSearch } from 'lucide-react'
 import { repoApi } from '../../services/api'
 import toast from 'react-hot-toast'
 import RepositoryList from './RepositoryList'
@@ -8,6 +8,8 @@ import AddRepositoryModal from './AddRepositoryModal'
 
 export default function Dashboard() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false)
+  const [scanPath, setScanPath] = useState('')
+  const [showScanInput, setShowScanInput] = useState(false)
   const queryClient = useQueryClient()
 
   const { data: repositories, isLoading, refetch } = useQuery({
@@ -40,6 +42,22 @@ export default function Dashboard() {
     },
   })
 
+  const scanMutation = useMutation({
+    mutationFn: async (path: string) => {
+      const response = await repoApi.scan(path || undefined)
+      return response.data
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['repositories'] })
+      setShowScanInput(false)
+      setScanPath('')
+      toast.success(`Found ${data.length} repositories`)
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to scan')
+    },
+  })
+
   return (
     <div>
       <div className="flex justify-between items-center mb-6">
@@ -58,6 +76,13 @@ export default function Dashboard() {
             Refresh
           </button>
           <button
+            onClick={() => setShowScanInput(!showScanInput)}
+            className="btn btn-secondary flex items-center"
+          >
+            <FolderSearch className="h-4 w-4 mr-2" />
+            Scan Folder
+          </button>
+          <button
             onClick={() => setIsAddModalOpen(true)}
             className="btn btn-primary flex items-center"
           >
@@ -66,6 +91,33 @@ export default function Dashboard() {
           </button>
         </div>
       </div>
+
+      {showScanInput && (
+        <div className="mb-6 p-4 bg-gray-800 rounded-lg">
+          <label className="block text-sm font-medium text-gray-300 mb-2">
+            Scan folder for Java projects
+          </label>
+          <div className="flex space-x-3">
+            <input
+              type="text"
+              value={scanPath}
+              onChange={(e) => setScanPath(e.target.value)}
+              className="input flex-1"
+              placeholder="/Users/andreirizea/hack/JavaPatching"
+            />
+            <button
+              onClick={() => scanMutation.mutate(scanPath)}
+              disabled={scanMutation.isPending}
+              className="btn btn-primary"
+            >
+              {scanMutation.isPending ? 'Scanning...' : 'Scan'}
+            </button>
+          </div>
+          <p className="text-xs text-gray-500 mt-2">
+            Scans for directories containing pom.xml or build.gradle
+          </p>
+        </div>
+      )}
 
       {isLoading ? (
         <div className="flex justify-center py-12">

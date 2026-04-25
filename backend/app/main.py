@@ -1,14 +1,30 @@
 """FastAPI application entry point."""
 
+import logging
+import sys
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import agent, auth, audit, automation, impact, patches, repositories, skills
+from app.api.routes import agent, agents, auth, audit, automation, impact, patches, repositories, skills
+
+# Import agents module to trigger agent registration
+from app.agents import agent_registry  # noqa: F401
 from app.core.config import settings
 from app.core.database import close_db, init_db
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stdout,
+)
+# Reduce noise from httpx and httpcore
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 @asynccontextmanager
@@ -47,6 +63,7 @@ app.include_router(agent.router, prefix="/api/agent", tags=["Agent"])
 app.include_router(audit.router, prefix="/api/audit", tags=["Audit"])
 app.include_router(automation.router, prefix="/api/automation", tags=["Automation"])
 app.include_router(skills.router, prefix="/api/skills", tags=["Skills"])
+app.include_router(agents.router, prefix="/api/agents", tags=["Agents"])
 
 
 @app.get("/api/health")

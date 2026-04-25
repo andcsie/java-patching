@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -9,12 +9,35 @@ import {
   Trash2,
   ArrowLeft,
   AlertTriangle,
+  Bot,
+  Cpu,
+  Shield,
+  ChevronDown,
+  ChevronUp,
+  CheckCircle,
+  XCircle,
+  Loader2,
+  Sparkles,
+  FileCode,
+  Wand2,
+  Zap,
 } from 'lucide-react'
-import { repoApi } from '../../services/api'
+import { repoApi, agentsApi, automationApi } from '../../services/api'
 import { useAnalyses, useStartAnalysis } from '../../hooks/useAnalysis'
 import { useLLMProviders } from '../../hooks/useLLMProvider'
 import toast from 'react-hot-toast'
 import RiskBadge from '../analysis/RiskBadge'
+
+interface AgentResult {
+  success: boolean
+  agent_name: string
+  action: string
+  data: Record<string, unknown> | null
+  error: string | null
+  warnings: string[]
+  suggested_next_agent: string | null
+  suggested_next_action: string | null
+}
 
 export default function RepositoryDetail() {
   const { id } = useParams<{ id: string }>()
@@ -23,10 +46,88 @@ export default function RepositoryDetail() {
   const [fromVersion, setFromVersion] = useState('')
   const [toVersion, setToVersion] = useState('')
   const [selectedProvider, setSelectedProvider] = useState('')
+  const [agentsPanelOpen, setAgentsPanelOpen] = useState(true)
+  const [agentResult, setAgentResult] = useState<AgentResult | null>(null)
+  const [runningAgent, setRunningAgent] = useState<string | null>(null)
+  const [lastImpacts, setLastImpacts] = useState<Record<string, unknown>[] | null>(null)
 
   const { data: providers } = useLLMProviders()
   const { data: analyses } = useAnalyses(id)
   const startAnalysis = useStartAnalysis()
+
+  // Fetch available agents
+  const { data: agents } = useQuery({
+    queryKey: ['agents'],
+    queryFn: async () => {
+      const response = await agentsApi.list()
+      return response.data
+    },
+  })
+
+  // Fetch detected JDK version
+  const { data: detectedVersion, refetch: refetchVersion } = useQuery({
+    queryKey: ['jdk-version', id],
+    queryFn: async () => {
+      const response = await automationApi.getJdkVersion(id!)
+      return response.data
+    },
+    enabled: false, // Manual trigger
+  })
+
+  // Fetch available patches
+  const { data: availablePatches, refetch: refetchPatches } = useQuery({
+    queryKey: ['patches', id],
+    queryFn: async () => {
+      const response = await automationApi.getAvailablePatches(id!)
+      return response.data
+    },
+    enabled: false, // Manual trigger
+  })
+
+  // Execute agent action
+  const executeAgent = async (agentName: string, actionName: string, params: Record<string, unknown> = {}) => {
+    setRunningAgent(`${agentName}:${actionName}`)
+    setAgentResult(null)
+    try {
+      const response = await agentsApi.execute(agentName, actionName, {
+        repository_id: id,
+        parameters: params,
+      })
+      setAgentResult(response.data)
+
+      // Save impacts for chaining LLM actions
+      if (response.data.success && response.data.data) {
+        if (actionName === 'analyze_impact' && response.data.data.impacts) {
+          setLastImpacts(response.data.data.impacts as Record<string, unknown>[])
+        } else if (actionName === 'explain_impacts' && response.data.data.impacts) {
+          setLastImpacts(response.data.data.impacts as Record<string, unknown>[])
+        } else if (actionName === 'generate_fixes' && response.data.data.impacts_with_fixes) {
+          setLastImpacts(response.data.data.impacts_with_fixes as Record<string, unknown>[])
+        }
+      }
+
+      if (response.data.success) {
+        toast.success(`${agentName}:${actionName} completed`)
+      } else {
+        toast.error(response.data.error || 'Action failed')
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to execute agent'
+      toast.error(message)
+      setAgentResult({
+        success: false,
+        agent_name: agentName,
+        action: actionName,
+        data: null,
+        error: message,
+        warnings: [],
+        suggested_next_agent: null,
+        suggested_next_action: null,
+      })
+    } finally {
+      setRunningAgent(null)
+    }
+  }
 
   const { data: repo, isLoading } = useQuery({
     queryKey: ['repository', id],
@@ -36,6 +137,18 @@ export default function RepositoryDetail() {
     },
     enabled: !!id,
   })
+
+  // Auto-populate version fields when repo loads
+  useEffect(() => {
+    if (repo) {
+      if (repo.current_jdk_version && !fromVersion) {
+        setFromVersion(repo.current_jdk_version)
+      }
+      if (repo.target_jdk_version && !toVersion) {
+        setToVersion(repo.target_jdk_version)
+      }
+    }
+  }, [repo])
 
   const cloneMutation = useMutation({
     mutationFn: async () => {
@@ -254,6 +367,358 @@ export default function RepositoryDetail() {
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Agents Panel */}
+      <div className="card mb-6">
+        <button
+          onClick={() => setAgentsPanelOpen(!agentsPanelOpen)}
+          className="w-full flex items-center justify-between text-lg font-medium text-white mb-4"
+        >
+          <div className="flex items-center">
+            <Bot className="h-5 w-5 mr-2 text-purple-400" />
+            Agents
+          </div>
+          {agentsPanelOpen ? (
+            <ChevronUp className="h-5 w-5 text-gray-400" />
+          ) : (
+            <ChevronDown className="h-5 w-5 text-gray-400" />
+          )}
+        </button>
+
+        {agentsPanelOpen && (
+          <div className="space-y-4">
+            {/* Running Agent Banner */}
+            {runningAgent && (
+              <div className="bg-blue-900/40 border border-blue-500/50 rounded-md p-4 flex items-center">
+                <Loader2 className="h-5 w-5 text-blue-400 animate-spin mr-3" />
+                <div>
+                  <span className="text-blue-200 font-medium">Running: {runningAgent}</span>
+                  <p className="text-blue-300/70 text-sm">Please wait...</p>
+                </div>
+              </div>
+            )}
+
+            {!repo.local_path && (
+              <div className="bg-yellow-900/30 border border-yellow-500/50 rounded-md p-3 flex items-center text-sm">
+                <AlertTriangle className="h-4 w-4 text-yellow-500 mr-2" />
+                <span className="text-yellow-200">Clone repository first to use agents</span>
+              </div>
+            )}
+
+            {/* Quick Actions */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <button
+                onClick={() => executeAgent('renovate', 'detect_version', {
+                  repository_path: repo.local_path,
+                })}
+                disabled={!repo.local_path || runningAgent !== null}
+                className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+              >
+                <div className="flex items-center mb-1">
+                  {runningAgent === 'renovate:detect_version' ? (
+                    <Loader2 className="h-4 w-4 text-blue-400 animate-spin mr-2" />
+                  ) : (
+                    <Cpu className="h-4 w-4 text-blue-400 mr-2" />
+                  )}
+                  <span className="text-white text-sm font-medium">Detect Version</span>
+                </div>
+                <p className="text-xs text-gray-400">Scan build files for JDK version</p>
+              </button>
+
+              <button
+                onClick={() => executeAgent('renovate', 'get_available_patches', {
+                  repository_path: repo.local_path,
+                })}
+                disabled={!repo.local_path || runningAgent !== null}
+                className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+              >
+                <div className="flex items-center mb-1">
+                  {runningAgent === 'renovate:get_available_patches' ? (
+                    <Loader2 className="h-4 w-4 text-green-400 animate-spin mr-2" />
+                  ) : (
+                    <Download className="h-4 w-4 text-green-400 mr-2" />
+                  )}
+                  <span className="text-white text-sm font-medium">Get Patches</span>
+                </div>
+                <p className="text-xs text-gray-400">Query Adoptium for updates</p>
+              </button>
+
+              <button
+                onClick={() => {
+                  const from = fromVersion || repo.current_jdk_version || '11.0.18'
+                  const to = toVersion || repo.target_jdk_version || '11.0.22'
+                  executeAgent('analysis', 'analyze_impact', {
+                    repository_path: repo.local_path,
+                    from_version: from,
+                    to_version: to,
+                  })
+                }}
+                disabled={!repo.local_path || runningAgent !== null}
+                className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+              >
+                <div className="flex items-center mb-1">
+                  {runningAgent === 'analysis:analyze_impact' ? (
+                    <Loader2 className="h-4 w-4 text-yellow-400 animate-spin mr-2" />
+                  ) : (
+                    <AlertTriangle className="h-4 w-4 text-yellow-400 mr-2" />
+                  )}
+                  <span className="text-white text-sm font-medium">Analyze Impact</span>
+                </div>
+                <p className="text-xs text-gray-400">Check release notes & scan code</p>
+              </button>
+
+              <button
+                onClick={() => {
+                  const from = fromVersion || repo.current_jdk_version || '11.0.18'
+                  const to = toVersion || repo.target_jdk_version || '11.0.22'
+                  executeAgent('analysis', 'get_security_advisories', {
+                    from_version: from,
+                    to_version: to,
+                  })
+                }}
+                disabled={!repo.local_path || runningAgent !== null}
+                className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+              >
+                <div className="flex items-center mb-1">
+                  {runningAgent === 'analysis:get_security_advisories' ? (
+                    <Loader2 className="h-4 w-4 text-red-400 animate-spin mr-2" />
+                  ) : (
+                    <Shield className="h-4 w-4 text-red-400 mr-2" />
+                  )}
+                  <span className="text-white text-sm font-medium">Security CVEs</span>
+                </div>
+                <p className="text-xs text-gray-400">List security fixes between versions</p>
+              </button>
+            </div>
+
+            {/* LLM-Powered Actions */}
+            <div className="border-t border-gray-700 pt-4 mt-4">
+              <div className="flex items-center mb-3">
+                <Sparkles className="h-4 w-4 text-purple-400 mr-2" />
+                <span className="text-sm font-medium text-purple-400">LLM-Powered Analysis</span>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <button
+                  onClick={() => {
+                    const from = fromVersion || repo.current_jdk_version || '11.0.18'
+                    const to = toVersion || repo.target_jdk_version || '11.0.22'
+                    executeAgent('analysis', 'full_analysis', {
+                      repository_path: repo.local_path,
+                      from_version: from,
+                      to_version: to,
+                    })
+                  }}
+                  disabled={!repo.local_path || runningAgent !== null}
+                  className="p-3 bg-purple-900/30 hover:bg-purple-900/50 border border-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+                >
+                  <div className="flex items-center mb-1">
+                    {runningAgent === 'analysis:full_analysis' ? (
+                      <Loader2 className="h-4 w-4 text-purple-400 animate-spin mr-2" />
+                    ) : (
+                      <Zap className="h-4 w-4 text-purple-400 mr-2" />
+                    )}
+                    <span className="text-white text-sm font-medium">Full Analysis</span>
+                  </div>
+                  <p className="text-xs text-gray-400">Analyze → Explain → Fix → Patch</p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    if (!lastImpacts) {
+                      toast.error('Run "Analyze Impact" first')
+                      return
+                    }
+                    executeAgent('analysis', 'explain_impacts', {
+                      impacts: lastImpacts,
+                    })
+                  }}
+                  disabled={!lastImpacts || runningAgent !== null}
+                  className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+                >
+                  <div className="flex items-center mb-1">
+                    {runningAgent === 'analysis:explain_impacts' ? (
+                      <Loader2 className="h-4 w-4 text-blue-400 animate-spin mr-2" />
+                    ) : (
+                      <Sparkles className="h-4 w-4 text-blue-400 mr-2" />
+                    )}
+                    <span className="text-white text-sm font-medium">Explain Impacts</span>
+                  </div>
+                  <p className="text-xs text-gray-400">LLM explains each risk</p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    if (!lastImpacts) {
+                      toast.error('Run "Analyze Impact" first')
+                      return
+                    }
+                    executeAgent('analysis', 'generate_fixes', {
+                      impacts: lastImpacts,
+                    })
+                  }}
+                  disabled={!lastImpacts || runningAgent !== null}
+                  className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+                >
+                  <div className="flex items-center mb-1">
+                    {runningAgent === 'analysis:generate_fixes' ? (
+                      <Loader2 className="h-4 w-4 text-green-400 animate-spin mr-2" />
+                    ) : (
+                      <Wand2 className="h-4 w-4 text-green-400 mr-2" />
+                    )}
+                    <span className="text-white text-sm font-medium">Generate Fixes</span>
+                  </div>
+                  <p className="text-xs text-gray-400">LLM suggests code fixes</p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    if (!lastImpacts) {
+                      toast.error('Run "Generate Fixes" first')
+                      return
+                    }
+                    executeAgent('analysis', 'create_patch', {
+                      repository_path: repo.local_path,
+                      impacts_with_fixes: lastImpacts,
+                    })
+                  }}
+                  disabled={!lastImpacts || runningAgent !== null}
+                  className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+                >
+                  <div className="flex items-center mb-1">
+                    {runningAgent === 'analysis:create_patch' ? (
+                      <Loader2 className="h-4 w-4 text-orange-400 animate-spin mr-2" />
+                    ) : (
+                      <FileCode className="h-4 w-4 text-orange-400 mr-2" />
+                    )}
+                    <span className="text-white text-sm font-medium">Create Patch</span>
+                  </div>
+                  <p className="text-xs text-gray-400">Generate unified diffs</p>
+                </button>
+              </div>
+
+              {!lastImpacts && (
+                <p className="text-xs text-gray-500 mt-2">
+                  Run "Analyze Impact" first to enable LLM actions
+                </p>
+              )}
+            </div>
+
+            {/* More Actions */}
+            <details className="group">
+              <summary className="cursor-pointer text-sm text-gray-400 hover:text-gray-300 mt-4">
+                More actions...
+              </summary>
+              <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3">
+                <button
+                  onClick={() => {
+                    const target = toVersion || repo.target_jdk_version || '11.0.22'
+                    executeAgent('renovate', 'preview_version_bump', {
+                      target_version: target,
+                    })
+                  }}
+                  disabled={!repo.local_path || runningAgent !== null}
+                  className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded-lg text-left"
+                >
+                  <span className="text-white text-sm">Preview Bump</span>
+                  <p className="text-xs text-gray-400">Show diffs</p>
+                </button>
+
+                <button
+                  onClick={() => executeAgent('openrewrite', 'list_recipes', {})}
+                  disabled={runningAgent !== null}
+                  className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded-lg text-left"
+                >
+                  <span className="text-white text-sm">List Recipes</span>
+                  <p className="text-xs text-gray-400">OpenRewrite migrations</p>
+                </button>
+
+                <button
+                  onClick={() => {
+                    const target = toVersion || repo.target_jdk_version || '17.0.10'
+                    executeAgent('analysis', 'suggest_upgrade_path', {
+                      target_version: target,
+                    })
+                  }}
+                  disabled={!repo.local_path || runningAgent !== null}
+                  className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded-lg text-left"
+                >
+                  <span className="text-white text-sm">Upgrade Path</span>
+                  <p className="text-xs text-gray-400">Plan major upgrade</p>
+                </button>
+
+                <button
+                  onClick={() => executeAgent('renovate', 'generate_config', {})}
+                  disabled={!repo.local_path || runningAgent !== null}
+                  className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded-lg text-left"
+                >
+                  <span className="text-white text-sm">Generate Config</span>
+                  <p className="text-xs text-gray-400">Create renovate.json</p>
+                </button>
+              </div>
+            </details>
+
+            {/* Agent Result */}
+            {agentResult && (
+              <div className={`mt-4 p-4 rounded-lg ${agentResult.success ? 'bg-green-900/20 border border-green-500/30' : 'bg-red-900/20 border border-red-500/30'}`}>
+                <div className="flex items-center mb-2">
+                  {agentResult.success ? (
+                    <CheckCircle className="h-5 w-5 text-green-400 mr-2" />
+                  ) : (
+                    <XCircle className="h-5 w-5 text-red-400 mr-2" />
+                  )}
+                  <span className="text-white font-medium">
+                    {agentResult.agent_name}:{agentResult.action}
+                  </span>
+                </div>
+
+                {agentResult.error && (
+                  <p className="text-red-400 text-sm mb-2">{agentResult.error}</p>
+                )}
+
+                {agentResult.warnings.length > 0 && (
+                  <div className="mb-2">
+                    {agentResult.warnings.map((w, i) => (
+                      <p key={i} className="text-yellow-400 text-sm">⚠ {w}</p>
+                    ))}
+                  </div>
+                )}
+
+                {agentResult.data && (
+                  <details open className="mt-2">
+                    <summary className="cursor-pointer text-sm text-gray-400 hover:text-gray-300">
+                      Result data
+                    </summary>
+                    <pre className="mt-2 p-3 bg-gray-900 rounded text-xs text-gray-300 overflow-auto max-h-64">
+                      {JSON.stringify(agentResult.data, null, 2)}
+                    </pre>
+                  </details>
+                )}
+
+                {agentResult.suggested_next_agent && (
+                  <div className="mt-3 pt-3 border-t border-gray-700">
+                    <p className="text-sm text-gray-400">Suggested next:</p>
+                    <button
+                      onClick={() => {
+                        if (agentResult.suggested_next_agent && agentResult.suggested_next_action) {
+                          executeAgent(
+                            agentResult.suggested_next_agent,
+                            agentResult.suggested_next_action,
+                            {}
+                          )
+                        }
+                      }}
+                      className="mt-1 text-blue-400 hover:text-blue-300 text-sm"
+                    >
+                      → {agentResult.suggested_next_agent}:{agentResult.suggested_next_action}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Analysis History */}

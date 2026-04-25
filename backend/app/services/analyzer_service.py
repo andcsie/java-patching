@@ -1,6 +1,7 @@
 """Service for analyzing Java code for JDK upgrade impacts using tree-sitter."""
 
 import asyncio
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,8 @@ from tree_sitter import Language, Parser
 from app.models.analysis import AnalysisStatus, ChangeType, RiskLevel
 from app.services.llm_service import LLMService, llm_service
 from app.services.release_notes_service import JDKChange, release_notes_service
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -74,7 +77,10 @@ class AnalyzerService:
         """Analyze a repository for JDK upgrade impacts."""
         try:
             # 1. Scan for Java files
+            logger.info(f"[Analyzer] Scanning for Java files in {repo_path}")
             java_files = await self._scan_java_files(repo_path)
+            logger.info(f"[Analyzer] Found {len(java_files)} Java files")
+
             if not java_files:
                 return AnalysisResult(
                     status=AnalysisStatus.COMPLETED,
@@ -87,24 +93,33 @@ class AnalyzerService:
                 )
 
             # 2. Fetch release notes for version range
+            logger.info(f"[Analyzer] Fetching release notes: {from_version} -> {to_version}")
             changes = await release_notes_service.get_changes_between_versions(
                 from_version,
                 to_version,
             )
+            logger.info(f"[Analyzer] Got {len(changes)} JDK changes to check against")
 
             # 3. Analyze each file for impacts
+            logger.info("[Analyzer] Analyzing files for impacts...")
             all_impacts: list[ImpactItem] = []
             for file_path in java_files:
                 file_impacts = await self._analyze_file(file_path, changes)
+                if file_impacts:
+                    logger.info(f"[Analyzer] {file_path.name}: {len(file_impacts)} impacts")
                 all_impacts.extend(file_impacts)
+
+            logger.info(f"[Analyzer] Total impacts found: {len(all_impacts)}")
 
             # 4. Calculate risk score
             risk_score, risk_level = self._calculate_risk_score(all_impacts)
+            logger.info(f"[Analyzer] Risk score: {risk_score}, level: {risk_level}")
 
             # 5. Generate suggestions using LLM (if available)
             summary = None
             suggestions = None
             if all_impacts and self.llm.available_providers:
+                logger.info("[Analyzer] Generating LLM suggestions...")
                 try:
                     summary, suggestions = await self._generate_suggestions(
                         all_impacts,
@@ -112,10 +127,11 @@ class AnalyzerService:
                         to_version,
                         llm_provider,
                     )
-                except Exception:
-                    # LLM failure shouldn't fail the analysis
-                    pass
+                    logger.info("[Analyzer] LLM suggestions generated")
+                except Exception as e:
+                    logger.warning(f"[Analyzer] LLM suggestion failed: {e}")
 
+            logger.info("[Analyzer] Analysis complete")
             return AnalysisResult(
                 status=AnalysisStatus.COMPLETED,
                 impacts=all_impacts,
@@ -127,6 +143,7 @@ class AnalyzerService:
             )
 
         except Exception as e:
+            logger.error(f"[Analyzer] Analysis failed: {e}")
             return AnalysisResult(
                 status=AnalysisStatus.FAILED,
                 impacts=[],

@@ -465,6 +465,216 @@ Generate a detailed migration plan.""",
 
         return await self.complete(messages, provider)
 
+    async def explain_impact(
+        self,
+        code_snippet: str,
+        file_path: str,
+        line_number: int,
+        change_description: str,
+        change_type: str,
+        cve_id: str | None = None,
+        provider: str | None = None,
+    ) -> dict:
+        """Explain why a specific code pattern is impacted by a JDK change."""
+        cve_info = f"\nCVE: {cve_id}" if cve_id else ""
+
+        messages = [
+            {
+                "role": "system",
+                "content": """You are a Java security and compatibility expert. Analyze code impacts from JDK changes.
+
+Provide your response as JSON with these fields:
+{
+  "risk_level": "LOW|MEDIUM|HIGH|CRITICAL",
+  "explanation": "Clear explanation of why this code is affected",
+  "runtime_behavior": "What happens if this code runs on the new JDK without changes",
+  "security_implications": "Any security concerns (especially for CVE-related changes)",
+  "recommendation": "Recommended action (fix now, test thoroughly, monitor, etc.)"
+}
+
+Be concise but specific. Focus on practical implications.""",
+            },
+            {
+                "role": "user",
+                "content": f"""File: {file_path}:{line_number}
+
+Code:
+```java
+{code_snippet}
+```
+
+JDK Change ({change_type}):
+{change_description}{cve_info}
+
+Explain the impact on this code.""",
+            },
+        ]
+
+        response = await self.complete(messages, provider, temperature=0.3)
+
+        # Parse JSON response
+        import json
+        import re
+
+        # Extract JSON from response (handle markdown code blocks)
+        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response, re.DOTALL)
+        if json_match:
+            response = json_match.group(1)
+
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            return {
+                "risk_level": "MEDIUM",
+                "explanation": response,
+                "runtime_behavior": "Unknown",
+                "security_implications": "Review manually",
+                "recommendation": "Test thoroughly",
+            }
+
+    async def generate_fix(
+        self,
+        code_snippet: str,
+        file_path: str,
+        change_description: str,
+        change_type: str,
+        full_file_content: str | None = None,
+        provider: str | None = None,
+    ) -> dict:
+        """Generate a code fix for an impacted code pattern."""
+        context = ""
+        if full_file_content:
+            # Include some context but limit size
+            context = f"\n\nFull file context (for imports/class structure):\n```java\n{full_file_content[:2000]}...\n```"
+
+        messages = [
+            {
+                "role": "system",
+                "content": """You are an expert Java developer fixing code for JDK compatibility.
+
+Generate a fix for the impacted code. Provide your response as JSON:
+{
+  "fixed_code": "The corrected Java code snippet",
+  "explanation": "Brief explanation of what was changed and why",
+  "imports_needed": ["any.new.imports.Required"],
+  "breaking_change": true/false,
+  "test_suggestion": "How to test this change"
+}
+
+Rules:
+- Maintain the same functionality
+- Use modern Java idioms appropriate for the target JDK
+- Prefer standard library over external dependencies
+- Keep the fix minimal - don't refactor unrelated code""",
+            },
+            {
+                "role": "user",
+                "content": f"""File: {file_path}
+
+Original code with issue:
+```java
+{code_snippet}
+```
+
+JDK Change ({change_type}):
+{change_description}{context}
+
+Generate a fix.""",
+            },
+        ]
+
+        response = await self.complete(messages, provider, temperature=0.2)
+
+        # Parse JSON response
+        import json
+        import re
+
+        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response, re.DOTALL)
+        if json_match:
+            response = json_match.group(1)
+
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            return {
+                "fixed_code": code_snippet,
+                "explanation": response,
+                "imports_needed": [],
+                "breaking_change": False,
+                "test_suggestion": "Manual review required",
+            }
+
+    async def generate_patch(
+        self,
+        file_path: str,
+        original_content: str,
+        impacts_with_fixes: list[dict],
+        provider: str | None = None,
+    ) -> dict:
+        """Generate a unified diff patch for a file with multiple fixes."""
+        fixes_description = "\n\n".join(
+            f"Line {fix.get('line_number', '?')}:\n"
+            f"Original: {fix.get('original_code', 'N/A')}\n"
+            f"Fixed: {fix.get('fixed_code', 'N/A')}\n"
+            f"Reason: {fix.get('explanation', 'N/A')}"
+            for fix in impacts_with_fixes
+        )
+
+        messages = [
+            {
+                "role": "system",
+                "content": """You are a code patch generator. Create a unified diff patch that applies all fixes to a Java file.
+
+Provide your response as JSON:
+{
+  "patched_content": "The complete patched file content",
+  "unified_diff": "The unified diff (--- a/file\\n+++ b/file\\n@@ ... @@)",
+  "changes_summary": ["List of changes made"],
+  "warnings": ["Any warnings about the patch"]
+}
+
+Rules:
+- Apply ALL fixes provided
+- Maintain proper Java syntax
+- Preserve formatting and comments where possible
+- Handle overlapping changes gracefully""",
+            },
+            {
+                "role": "user",
+                "content": f"""File: {file_path}
+
+Original content:
+```java
+{original_content}
+```
+
+Fixes to apply:
+{fixes_description}
+
+Generate the patched file and unified diff.""",
+            },
+        ]
+
+        response = await self.complete(messages, provider, temperature=0.1, max_tokens=8192)
+
+        # Parse JSON response
+        import json
+        import re
+
+        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response, re.DOTALL)
+        if json_match:
+            response = json_match.group(1)
+
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            return {
+                "patched_content": original_content,
+                "unified_diff": "",
+                "changes_summary": ["Failed to generate patch - manual review required"],
+                "warnings": [response[:500]],
+            }
+
 
 # Global instance
 llm_service = LLMService()

@@ -69,7 +69,7 @@ export default function AddRepositoryModal({ isOpen, onClose, onSubmit, isLoadin
 
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-1">
-                Repository URL *
+                Repository URL or Path *
               </label>
               <input
                 type="text"
@@ -79,6 +79,9 @@ export default function AddRepositoryModal({ isOpen, onClose, onSubmit, isLoadin
                 className="input"
                 placeholder="https://github.com/user/repo.git"
               />
+              <p className="text-xs text-gray-500 mt-1">
+                Git URL, or local path: /path/to/repo
+              </p>
             </div>
 
             <div>

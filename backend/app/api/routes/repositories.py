@@ -1,11 +1,13 @@
 """Repository management routes."""
 
 import uuid
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.deps import CurrentUser, DbSession
+from app.core.config import settings
 from app.schemas.repository import (
     RepositoryCloneResponse,
     RepositoryCreate,
@@ -32,7 +34,7 @@ RepoServiceDep = Annotated[RepositoryService, Depends(get_repository_service)]
 AuditServiceDep = Annotated[AuditService, Depends(get_audit_service)]
 
 
-@router.post("/", response_model=RepositoryResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=RepositoryResponse, status_code=status.HTTP_201_CREATED)
 async def create_repository(
     repo_data: RepositoryCreate,
     current_user: CurrentUser,
@@ -55,7 +57,7 @@ async def create_repository(
     return RepositoryResponse.model_validate(repo)
 
 
-@router.get("/", response_model=list[RepositoryResponse])
+@router.get("", response_model=list[RepositoryResponse])
 async def list_repositories(
     current_user: CurrentUser,
     repo_service: RepoServiceDep,
@@ -266,3 +268,32 @@ async def detect_jdk_version(
 
     version = await repo_service.detect_jdk_version(repo)
     return {"detected_version": version}
+
+
+@router.post("/scan", response_model=list[RepositoryResponse])
+async def scan_repositories(
+    current_user: CurrentUser,
+    repo_service: RepoServiceDep,
+    scan_path: str | None = None,
+) -> list[RepositoryResponse]:
+    """Scan a directory for Java projects and auto-import them.
+
+    If scan_path is not provided, uses REPOS_SCAN_PATH from settings.
+    """
+    path_to_scan = scan_path or settings.repos_scan_path
+
+    if not path_to_scan:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No scan path provided. Set REPOS_SCAN_PATH in .env or provide scan_path parameter",
+        )
+
+    scan_dir = Path(path_to_scan)
+    if not scan_dir.exists():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Scan path does not exist: {path_to_scan}",
+        )
+
+    repos = await repo_service.scan_and_discover(scan_dir, current_user.id)
+    return [RepositoryResponse.model_validate(r) for r in repos]
