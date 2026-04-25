@@ -1,11 +1,14 @@
 """Multi-LLM provider service supporting OpenAI, Anthropic, Gemini, and Ollama."""
 
+import logging
 from abc import ABC, abstractmethod
 from typing import AsyncIterator
 
 import httpx
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class LLMProvider(ABC):
@@ -215,7 +218,34 @@ class GeminiProvider(LLMProvider):
             )
             response.raise_for_status()
             data = response.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+
+            # Handle various Gemini response structures
+            if "candidates" not in data or not data["candidates"]:
+                # Check for prompt feedback (content blocked)
+                if "promptFeedback" in data:
+                    block_reason = data["promptFeedback"].get("blockReason", "UNKNOWN")
+                    logger.warning(f"[Gemini] Content blocked: {block_reason}")
+                    raise ValueError(f"Gemini blocked content: {block_reason}")
+                logger.warning(f"[Gemini] No candidates in response: {data}")
+                raise ValueError("Gemini returned no candidates")
+
+            candidate = data["candidates"][0]
+
+            # Check for finish reason issues
+            finish_reason = candidate.get("finishReason", "")
+            if finish_reason == "SAFETY":
+                logger.warning(f"[Gemini] Safety filter triggered: {candidate}")
+                raise ValueError("Gemini blocked response due to safety filters")
+            if finish_reason == "RECITATION":
+                logger.warning(f"[Gemini] Recitation policy triggered: {candidate}")
+                raise ValueError("Gemini blocked response due to recitation policy")
+
+            # Extract text from content
+            if "content" not in candidate or "parts" not in candidate["content"]:
+                logger.warning(f"[Gemini] Missing content in response: {candidate}")
+                raise ValueError(f"Gemini response missing content: {candidate}")
+
+            return candidate["content"]["parts"][0]["text"]
 
     async def stream(self, messages: list[dict], **kwargs) -> AsyncIterator[str]:
         """Stream a completion using Gemini API."""
@@ -257,10 +287,12 @@ class GeminiProvider(LLMProvider):
                         import json
 
                         data = json.loads(line[6:])
-                        if "candidates" in data:
-                            text = data["candidates"][0]["content"]["parts"][0].get("text", "")
-                            if text:
-                                yield text
+                        if "candidates" in data and data["candidates"]:
+                            candidate = data["candidates"][0]
+                            if "content" in candidate and "parts" in candidate["content"]:
+                                text = candidate["content"]["parts"][0].get("text", "")
+                                if text:
+                                    yield text
 
 
 class OllamaProvider(LLMProvider):

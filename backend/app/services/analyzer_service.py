@@ -237,7 +237,21 @@ class AnalyzerService:
                         )
                     )
 
-        return impacts
+        # Deduplicate impacts by (file, line, affected_class/method)
+        seen = set()
+        unique_impacts = []
+        for impact in impacts:
+            key = (
+                impact.location.file_path,
+                impact.location.line_number,
+                impact.affected_class or "",
+                impact.affected_method or "",
+            )
+            if key not in seen:
+                seen.add(key)
+                unique_impacts.append(impact)
+
+        return unique_impacts
 
     def _extract_imports(self, tree, content: str) -> list[dict]:
         """Extract import statements from AST."""
@@ -309,22 +323,40 @@ class AnalyzerService:
 
     def _matches_change(self, usage_name: str, change: JDKChange) -> bool:
         """Check if a usage matches a JDK change."""
+        # Skip overly generic names that cause false positives
+        GENERIC_NAMES = {
+            "String", "Object", "Integer", "Long", "Boolean", "Double", "Float",
+            "List", "Map", "Set", "Collection", "Array", "Class", "System",
+            "Exception", "Error", "Throwable", "Thread", "Runnable",
+        }
+        if usage_name in GENERIC_NAMES:
+            return False
+
         # Check against affected classes
         for affected_class in change.affected_classes:
-            # Exact match
+            # Skip if the affected class is generic
+            simple_name = affected_class.split(".")[-1]
+            if simple_name in GENERIC_NAMES:
+                continue
+
+            # Exact match (fully qualified)
             if usage_name == affected_class:
                 return True
-            # Simple name match
-            simple_name = affected_class.split(".")[-1]
-            if usage_name == simple_name:
+            # Simple name match only if it's a specific class
+            if usage_name == simple_name and len(simple_name) > 3:
                 return True
-            # Partial match (for method references)
-            if usage_name.endswith(f".{simple_name}"):
+            # Package-qualified match
+            if usage_name.endswith(f".{simple_name}") or usage_name.startswith(f"{simple_name}."):
                 return True
 
-        # Check against affected methods
+        # Check against affected methods (more strict)
         for affected_method in change.affected_methods:
-            if affected_method in usage_name:
+            # Require exact method name match, not substring
+            method_simple = affected_method.split(".")[-1] if "." in affected_method else affected_method
+            if method_simple in GENERIC_NAMES:
+                continue
+            # Match method call pattern: Class.method or just method
+            if usage_name == affected_method or usage_name.endswith(f".{method_simple}"):
                 return True
 
         return False

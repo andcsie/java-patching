@@ -9,183 +9,175 @@ The JavaPatching backend uses a multi-agent architecture where specialized agent
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        OrchestratorAgent                            │
-│                   (Coordinates Workflows)                           │
+│                   (Coordinates Full Workflows)                       │
 └─────────────────────────┬───────────────────────────────────────────┘
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         AgentBus                                     │
 │              (Pub/Sub Messaging + Event System)                      │
-└─────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────────┘
-      │         │         │         │         │         │
-      ▼         ▼         ▼         ▼         ▼         ▼
-┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
-│ Scanner │ │ Release │ │ Impact  │ │Explainer│ │  Fixer  │ │ Patcher │
-│  Agent  │ │  Notes  │ │  Agent  │ │  Agent  │ │  Agent  │ │  Agent  │
-│         │ │  Agent  │ │         │ │  (LLM)  │ │  (LLM)  │ │  (LLM)  │
-└─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘
-      │                       │
-      │                       │
-      ▼                       ▼
-┌─────────────────┐   ┌─────────────────┐
-│ RenovateAgent   │   │ OpenRewriteAgent│
-│ (Patch Upgrades)│   │ (Major Upgrades)│
-└─────────────────┘   └─────────────────┘
+└─────┬─────────┬─────────┬─────────┬─────────┬───────────────────────┘
+      │         │         │         │         │
+      ▼         ▼         ▼         ▼         ▼
+┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
+│ Scanner │ │ Release │ │ Analysis│ │  Fixer  │ │ Patcher │
+│  Agent  │ │  Notes  │ │  Agent  │ │  Agent  │ │  Agent  │
+│         │ │  Agent  │ │ (+LLM)  │ │  (LLM)  │ │  (LLM)  │
+└─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘
+                              │
+                              │ Analysis includes
+                              │ LLM explanations
+                              ▼
+                    ┌─────────────────┐
+                    │  Impact Agent   │
+                    │ (Code Scanning) │
+                    └─────────────────┘
+      │                                         │
+      │                                         │
+      ▼                                         ▼
+┌─────────────────┐                   ┌─────────────────┐
+│ RenovateAgent   │                   │ OpenRewriteAgent│
+│ (Patch Upgrades)│                   │ (Major Upgrades)│
+│ Adoptium API    │                   │ Dynamic Recipes │
+└─────────────────┘                   └─────────────────┘
 ```
 
-## Agents
+## Agent Responsibilities
 
-### Core Pipeline Agents
+### AnalysisAgent (includes LLM)
+**Purpose:** Analyze JDK upgrade impacts WITH LLM-powered explanations
 
-| Agent | Responsibility | Input | Output |
-|-------|---------------|-------|--------|
-| **ScannerAgent** | Scan repository for Java files | Repository path | List of Java files, build tool info |
-| **ReleaseNotesAgent** | Fetch JDK release notes | Version range | List of changes (deprecated, removed, security) |
-| **ImpactAgent** | Analyze code against changes | Files + Changes | List of impacts with risk scores |
-| **ExplainerAgent** | LLM-powered explanations | Impacts | Explained impacts with context |
-| **FixerAgent** | LLM-powered fix generation | Impacts | Impacts with suggested fixes |
-| **PatcherAgent** | Create unified diffs | Fixes | Patch files |
+| Action | Description | LLM |
+|--------|-------------|-----|
+| `analyze_impact` | Scan code + explain impacts | ✅ Yes (parallel) |
+| `analyze_impact` (skip_llm=true) | Fast scan without explanations | ❌ No |
+| `get_release_notes` | Fetch JDK release notes | ❌ No |
+| `get_security_advisories` | Get CVEs between versions | ❌ No |
+| `suggest_upgrade_path` | Plan upgrade steps | ❌ No |
 
-### Tool Agents
+**Output:** List of impacts with `llm_explanation` field for each
 
-| Agent | Responsibility | Use Case |
-|-------|---------------|----------|
-| **RenovateAgent** | Version bumping via Adoptium API | Patch upgrades (11.0.18 → 11.0.22) |
-| **OpenRewriteAgent** | Recipe-based code transformations | Major upgrades (11 → 17) |
+### FixerAgent (separate, LLM)
+**Purpose:** Generate code fixes for impacts
 
-### Orchestration
+| Action | Description |
+|--------|-------------|
+| `generate_fixes` | LLM generates fix for each impact |
+| `fix_single` | Fix a single impact |
+| `validate_fix` | Validate generated fix |
 
-| Agent | Responsibility |
-|-------|---------------|
-| **OrchestratorAgent** | Coordinates multi-agent workflows, manages state |
+**Input:** Impacts from AnalysisAgent
+**Output:** Impacts with `fix` field containing suggested code
 
-## Communication Patterns
+### PatcherAgent (separate, LLM)
+**Purpose:** Create unified diff patches
 
-### AgentBus (Current Implementation)
+| Action | Description |
+|--------|-------------|
+| `create_patches` | Generate patches for all files |
+| `create_single_patch` | Patch for one file |
+| `apply_patch` | Apply patch to file |
+| `validate_patch` | Validate patch syntax |
 
-The `AgentBus` provides:
+**Input:** Impacts with fixes from FixerAgent
+**Output:** Unified diff patches per file
 
-1. **Pub/Sub Messaging**: Agents publish events, others subscribe
-2. **Request/Response**: Synchronous agent-to-agent calls
-3. **Event Patterns**: Wildcard subscriptions (`scanner.*`, `*`)
+### OrchestratorAgent
+**Purpose:** Coordinate multi-agent workflows
 
-```python
-# Subscribe to events
-agent_bus.subscribe("scanner.complete", handler)
-agent_bus.subscribe("impact.*", handler)  # All impact events
-agent_bus.subscribe("*", logger)  # All events
+| Action | Description |
+|--------|-------------|
+| `full_upgrade` | Run complete pipeline |
+| `quick_scan` | Fast impact assessment |
+| `patch_upgrade` | Simple version bump |
+| `major_upgrade` | OpenRewrite migration |
 
-# Publish events
-await agent_bus.publish(AgentMessage(
-    type=MessageType.EVENT,
-    from_agent="scanner",
-    action="complete",
-    payload={"files": [...]},
-))
+### RenovateAgent
+**Purpose:** JDK version management (patch upgrades)
 
-# Request/Response
-response = await agent_bus.request(
-    from_agent="orchestrator",
-    to_agent="impact",
-    action="analyze",
-    payload={"repository_path": "/path/to/repo"},
-)
-```
+- Uses **Adoptium API** for patch discovery
+- Detects JDK from build files
+- Self-contained Python implementation (no external tools)
 
-### WorkflowContext (Blackboard Pattern)
+### OpenRewriteAgent
+**Purpose:** Recipe-based code transformations (major upgrades)
 
-Shared state for workflow execution:
+- **Dynamically fetches recipes** from Moderne API / OpenRewrite docs
+- Falls back to known recipes if APIs unavailable
+- Requires Maven/Gradle with OpenRewrite plugin
 
-```python
-@dataclass
-class WorkflowContext:
-    workflow_id: UUID
-    repository_path: str
-    from_version: str
-    to_version: str
+## User Workflow
 
-    # Results from each stage
-    scan_result: dict | None = None
-    release_notes: list[dict] = field(default_factory=list)
-    impacts: list[dict] = field(default_factory=list)
-    explanations: list[dict] = field(default_factory=list)
-    fixes: list[dict] = field(default_factory=list)
-    patches: list[dict] = field(default_factory=list)
-
-    # Metadata
-    risk_score: int = 0
-    risk_level: str = "unknown"
-    completed_stages: list[str] = field(default_factory=list)
-```
-
-## Workflows
-
-### Full Upgrade Pipeline
+### UI Flow
 
 ```
-1. Scanner       → Scan Java files
-2. ReleaseNotes  → Fetch changes between versions
-3. Impact        → Analyze code against changes
-4. Explainer     → LLM explains each impact
-5. Fixer         → LLM generates fixes
-6. Patcher       → Create unified diff patches
-7. Renovate      → (Optional) Version bump
+┌─────────────────────────────────────────────────────────────────┐
+│                        Quick Actions                             │
+├─────────────┬─────────────┬─────────────┬───────────┬───────────┤
+│   Detect    │    Get      │  Analyze    │   Quick   │  Security │
+│   Version   │   Patches   │   Impact    │   Scan    │   CVEs    │
+│  (renovate) │ (renovate)  │ (analysis)  │(analysis) │ (analysis)│
+│             │             │  + LLM ✨   │  no LLM   │           │
+└─────────────┴─────────────┴──────┬──────┴───────────┴───────────┘
+                                   │
+                                   │ Returns impacts with
+                                   │ LLM explanations
+                                   ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   Code Transformation                            │
+├───────────────────┬───────────────────┬─────────────────────────┤
+│   Generate Fixes  │   Create Patches  │     Full Upgrade        │
+│   (fixer agent)   │  (patcher agent)  │   (orchestrator)        │
+│      LLM ✨       │      LLM ✨        │   All agents ✨          │
+└───────────────────┴───────────────────┴─────────────────────────┘
 ```
 
-### Quick Scan
+### Step-by-Step Workflow
+
+1. **Analyze Impact** (with LLM)
+   - Agent: `analysis`
+   - Action: `analyze_impact`
+   - Scans code for JDK upgrade impacts
+   - LLM explains each impact (parallel, 5 concurrent)
+   - Returns: `impacts[]` with `llm_explanation`
+
+2. **Generate Fixes** (separate call)
+   - Agent: `fixer`
+   - Action: `generate_fixes`
+   - Input: `impacts` from step 1
+   - LLM generates code fix for each impact
+   - Returns: `impacts_with_fixes[]` with `fix` field
+
+3. **Create Patches** (separate call)
+   - Agent: `patcher`
+   - Action: `create_patches`
+   - Input: `impacts_with_fixes` from step 2
+   - LLM creates unified diffs
+   - Returns: `patches[]` per file
+
+### Alternative: Fast Mode
+
+For quick scans without LLM overhead:
 
 ```
-1. Impact → Analyze code (no LLM)
+analysis:analyze_impact { skip_llm: true }
 ```
 
-### Patch Upgrade
+Returns impacts without explanations (faster).
+
+### Alternative: Full Orchestration
+
+Run all agents automatically:
 
 ```
-1. Renovate → Preview/apply version bump
+orchestrator:full_upgrade {
+  repository_path: "/path/to/repo",
+  from_version: "11.0.18",
+  to_version: "11.0.22"
+}
 ```
 
-### Major Upgrade
-
-```
-1. OpenRewrite → Suggest migration path
-2. OpenRewrite → Run recipes (dry-run or apply)
-```
-
-## Alternative: A2A Protocol
-
-### What is A2A?
-
-A2A (Agent-to-Agent) is Google's open protocol for agent interoperability:
-- **Transport**: HTTP/JSON-RPC 2.0
-- **Discovery**: Agent Cards (`/.well-known/agent.json`)
-- **State**: Task objects with artifacts
-- **Streaming**: SSE for long-running tasks
-
-### Comparison
-
-| Feature | AgentBus (Current) | A2A Protocol |
-|---------|-------------------|--------------|
-| Transport | In-process async | HTTP/JSON-RPC |
-| Discovery | Registry | Agent Cards |
-| State | Shared WorkflowContext | Task objects |
-| Streaming | Pub/Sub events | SSE |
-| External Agents | No | Yes |
-| Latency | ~0ms (in-process) | Network latency |
-| Deployment | Single process | Distributed |
-
-### When to Use A2A
-
-- Integrate **external agents** (other services/APIs)
-- Agents run as **separate microservices**
-- Need **vendor-neutral** agent interop
-- Multi-language agent systems
-
-### When to Use AgentBus
-
-- All agents run **in-process**
-- Single deployment
-- Lower latency requirements
-- Tighter codebase integration
+Orchestrator runs: Scanner → ReleaseNotes → Impact → Explainer → Fixer → Patcher → Renovate
 
 ## API Endpoints
 
@@ -196,60 +188,147 @@ POST /api/agents/{agent_name}/actions/{action_name}
 Content-Type: application/json
 
 {
+  "repository_id": "uuid",
   "parameters": {
     "repository_path": "/path/to/repo",
     "from_version": "11.0.18",
-    "to_version": "11.0.22"
+    "to_version": "11.0.22",
+    "llm_provider": "anthropic",
+    "skip_llm": false
   }
 }
 ```
 
-### List Agents
+### Response
 
-```http
-GET /api/agents
+```json
+{
+  "success": true,
+  "agent_name": "analysis",
+  "action": "analyze_impact",
+  "data": {
+    "risk_score": 45,
+    "risk_level": "medium",
+    "total_impacts": 3,
+    "impacts": [
+      {
+        "file_path": "/path/to/File.java",
+        "line_number": 42,
+        "code_snippet": "SecurityManager sm = ...",
+        "change_type": "deprecated",
+        "severity": "high",
+        "description": "SecurityManager deprecated in JDK 17",
+        "llm_explanation": {
+          "summary": "This code uses SecurityManager which is deprecated...",
+          "risk": "Runtime warnings, future removal",
+          "recommendation": "Migrate to Security Manager alternatives"
+        }
+      }
+    ]
+  },
+  "suggested_next_agent": "fixer",
+  "suggested_next_action": "generate_fixes"
+}
 ```
 
-### Get Agent Actions
+## Agent Communication
 
-```http
-GET /api/agents/{agent_name}/actions
-```
+### AgentBus
 
-## Usage Examples
-
-### Full Analysis via Orchestrator
+Pub/Sub messaging for inter-agent communication:
 
 ```python
-from app.agents import agent_registry
-from app.agents.base import AgentContext
+# Subscribe to events
+agent_bus.subscribe("analysis.complete", handler)
+agent_bus.subscribe("fixer.*", handler)  # All fixer events
 
-context = AgentContext(user_id=user.id)
-
-result = await agent_registry.execute(
-    "orchestrator",
-    "full_upgrade",
-    context,
-    repository_path="/path/to/repo",
-    from_version="11.0.18",
-    to_version="11.0.22",
-    llm_provider="anthropic",
-)
-
-print(result.data["risk_score"])
-print(result.data["patches"])
+# Publish events
+await agent_bus.publish(AgentMessage(
+    type=MessageType.EVENT,
+    from_agent="analysis",
+    action="complete",
+    payload={"impacts": [...]},
+))
 ```
 
-### Direct Agent Call
+### WorkflowContext (Blackboard Pattern)
+
+Shared state for orchestrated workflows:
 
 ```python
-result = await agent_registry.execute(
-    "impact",
-    "analyze",
-    context,
-    repository_path="/path/to/repo",
-    from_version="11.0.18",
-    to_version="11.0.22",
+@dataclass
+class WorkflowContext:
+    workflow_id: UUID
+    repository_path: str
+    from_version: str
+    to_version: str
+
+    # Results from each stage
+    scan_result: dict | None
+    release_notes: list[dict]
+    impacts: list[dict]          # From AnalysisAgent
+    explanations: list[dict]     # LLM explanations (included in impacts)
+    fixes: list[dict]            # From FixerAgent
+    patches: list[dict]          # From PatcherAgent
+    version_bumps: list[dict]    # From RenovateAgent
+
+    # Metadata
+    risk_score: int
+    risk_level: str
+    completed_stages: list[str]
+```
+
+## Performance Optimizations
+
+### Parallel LLM Calls
+
+All LLM operations run with concurrency limit:
+
+```python
+semaphore = asyncio.Semaphore(10)  # Max 10 concurrent
+
+async def explain_one(impact, index):
+    async with semaphore:
+        return await llm_service.explain_impact(...)
+
+tasks = [explain_one(impact, i) for i, impact in enumerate(impacts)]
+results = await asyncio.gather(*tasks)
+```
+
+### Release Notes Fetching
+
+- Fetches all versions in parallel
+- Oracle + Adoptium fetched in parallel per version
+- 3-second timeout (fail fast)
+- Results cached per version
+
+### File Content Caching
+
+FixerAgent caches file contents to avoid re-reading:
+
+```python
+file_cache: dict[str, str | None] = {}
+def get_file_content(path):
+    if path not in file_cache:
+        file_cache[path] = Path(path).read_text()
+    return file_cache[path]
+```
+
+## OpenRewrite Recipe Fetching
+
+Recipes are fetched dynamically (not hardcoded):
+
+1. **Moderne API** - Primary source
+2. **OpenRewrite Docs** - Fallback
+3. **Known Recipes** - Final fallback
+
+```python
+# Search for recipes
+recipes = await recipe_service.search_recipes("java 17")
+
+# Get specific recipe
+recipe = await recipe_service.get_recipe(
+    "org.openrewrite.java.migrate.UpgradeToJava17"
 )
 ```
 
@@ -295,20 +374,24 @@ from app.agents import my_agent  # noqa: F401
 
 3. Agent is automatically registered and available via API.
 
-## Renovate Integration
+## Summary
 
-The `RenovateAgent` is a **self-contained Python implementation** that:
-- Uses **Adoptium API** for patch discovery
-- Detects JDK version from `pom.xml`, `build.gradle`, `.java-version`, etc.
-- Generates and applies version bumps
+| Agent | Responsibility | Uses LLM |
+|-------|---------------|----------|
+| **analysis** | Impact detection + explanations | ✅ Yes |
+| **fixer** | Code fix generation | ✅ Yes |
+| **patcher** | Unified diff creation | ✅ Yes |
+| **orchestrator** | Workflow coordination | ❌ No |
+| **renovate** | Version bumping | ❌ No |
+| **openrewrite** | Recipe execution | ❌ No |
+| **scanner** | File scanning | ❌ No |
+| **release_notes** | Release notes fetching | ❌ No |
+| **impact** | Code impact analysis | ❌ No |
+| **explainer** | Impact explanations | ✅ Yes |
 
-No external Renovate installation required.
-
-## OpenRewrite Integration
-
-The `OpenRewriteAgent` provides:
-- Predefined recipes for JDK migrations (8→11, 11→17, 17→21)
-- Security fixes (OWASP Top 10)
-- Spring Boot migrations
-
-**Note**: Actual recipe execution requires Maven/Gradle with OpenRewrite plugin installed in the target repository.
+**Key Design Decisions:**
+- Analysis includes LLM explanations (single call for analyze + explain)
+- Fixing is a **separate agent** (user must explicitly request)
+- Patching is a **separate agent** (user must explicitly request)
+- All LLM calls run in parallel (5 concurrent max)
+- OpenRewrite recipes fetched dynamically from APIs

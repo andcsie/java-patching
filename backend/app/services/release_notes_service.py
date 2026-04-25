@@ -31,8 +31,8 @@ class ReleaseNotesService:
     """Service for fetching JDK release notes from various sources."""
 
     def __init__(self):
-        # Reduced timeout to prevent long waits when APIs are slow/unreachable
-        self.client = httpx.AsyncClient(timeout=5.0)
+        # Short timeout - fail fast if APIs are slow
+        self.client = httpx.AsyncClient(timeout=3.0)
         self._change_cache: dict[str, list[JDKChange]] = {}
 
     async def close(self):
@@ -45,6 +45,8 @@ class ReleaseNotesService:
         to_version: str,
     ) -> list[JDKChange]:
         """Get all changes between two JDK versions."""
+        import asyncio
+
         logging.info(f"[ReleaseNotes] Getting changes: {from_version} -> {to_version}")
 
         # Parse version numbers
@@ -64,20 +66,28 @@ class ReleaseNotesService:
         from_patch = from_parts[2] if len(from_parts) > 2 else from_parts[1]
         to_patch = to_parts[2] if len(to_parts) > 2 else to_parts[1]
 
+        # Build list of versions to fetch
+        versions_to_fetch = [
+            f"{major_version}.0.{patch}"
+            for patch in range(from_patch + 1, to_patch + 1)
+        ]
+
+        if not versions_to_fetch:
+            return []
+
+        logging.info(f"[ReleaseNotes] Fetching {len(versions_to_fetch)} versions in parallel")
+
+        # Fetch all versions in parallel
+        tasks = [self._get_version_changes(v) for v in versions_to_fetch]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
         all_changes: list[JDKChange] = []
-
-        # Get changes for each patch version in between
-        current_patch = from_patch + 1
-        while current_patch <= to_patch:
-            version_str = f"{major_version}.0.{current_patch}"
-            logging.info(f"[ReleaseNotes] Fetching changes for {version_str}")
-
-            # Fetch from APIs
-            changes = await self._get_version_changes(version_str)
-            logging.info(f"[ReleaseNotes] Got {len(changes)} changes for {version_str}")
-            all_changes.extend(changes)
-
-            current_patch += 1
+        for version_str, result in zip(versions_to_fetch, results):
+            if isinstance(result, Exception):
+                logging.warning(f"[ReleaseNotes] Failed to fetch {version_str}: {result}")
+            else:
+                logging.info(f"[ReleaseNotes] Got {len(result)} changes for {version_str}")
+                all_changes.extend(result)
 
         logging.info(f"[ReleaseNotes] Total changes found: {len(all_changes)}")
         return all_changes
@@ -91,18 +101,23 @@ class ReleaseNotesService:
 
     async def _get_version_changes(self, version: str) -> list[JDKChange]:
         """Get changes for a specific JDK version."""
+        import asyncio
+
         if version in self._change_cache:
             return self._change_cache[version]
 
+        # Fetch from Oracle and Adoptium in parallel
+        openjdk_task = self._fetch_openjdk_changes(version)
+        adoptium_task = self._fetch_adoptium_changes(version)
+
+        results = await asyncio.gather(openjdk_task, adoptium_task, return_exceptions=True)
+
         changes: list[JDKChange] = []
-
-        # Try OpenJDK release notes
-        openjdk_changes = await self._fetch_openjdk_changes(version)
-        changes.extend(openjdk_changes)
-
-        # Try Adoptium API
-        adoptium_changes = await self._fetch_adoptium_changes(version)
-        changes.extend(adoptium_changes)
+        for result in results:
+            if isinstance(result, Exception):
+                logging.warning(f"[ReleaseNotes] Fetch error for {version}: {result}")
+            else:
+                changes.extend(result)
 
         # Cache the results
         self._change_cache[version] = changes

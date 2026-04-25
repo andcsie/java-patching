@@ -140,8 +140,11 @@ class ExplainerAgent(Agent):
 
     async def _explain(self, context: AgentContext, **kwargs) -> AgentResult:
         """Explain all impacts using LLM."""
+        import asyncio
+
         impacts = kwargs.get("impacts", [])
         llm_provider = kwargs.get("llm_provider")
+        max_concurrent = kwargs.get("max_concurrent", 10)  # Parallel LLM calls
 
         if not impacts:
             return AgentResult(
@@ -159,31 +162,32 @@ class ExplainerAgent(Agent):
                 error="No LLM providers configured. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_API_KEY.",
             )
 
-        logger.info(f"[Explainer] Explaining {len(impacts)} impacts")
-        explained_impacts = []
+        logger.info(f"[Explainer] Explaining {len(impacts)} impacts (parallel, max {max_concurrent})")
 
-        for i, impact in enumerate(impacts):
-            logger.info(f"[Explainer] Explaining impact {i+1}/{len(impacts)}")
-            try:
-                explanation = await llm_service.explain_impact(
-                    code_snippet=impact.get("code_snippet", ""),
-                    file_path=impact.get("file_path", ""),
-                    line_number=impact.get("line_number", 0),
-                    change_description=impact.get("description", ""),
-                    change_type=impact.get("change_type", ""),
-                    cve_id=impact.get("cve_id"),
-                    provider=llm_provider,
-                )
-                explained_impacts.append({
-                    **impact,
-                    "llm_explanation": explanation,
-                })
-            except Exception as e:
-                logger.warning(f"[Explainer] Failed to explain impact: {e}")
-                explained_impacts.append({
-                    **impact,
-                    "llm_explanation": {"error": str(e)},
-                })
+        # Process impacts in parallel batches
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def explain_one(impact: dict, index: int) -> dict:
+            async with semaphore:
+                logger.info(f"[Explainer] Explaining impact {index+1}/{len(impacts)}")
+                try:
+                    explanation = await llm_service.explain_impact(
+                        code_snippet=impact.get("code_snippet", ""),
+                        file_path=impact.get("file_path", ""),
+                        line_number=impact.get("line_number", 0),
+                        change_description=impact.get("description", ""),
+                        change_type=impact.get("change_type", ""),
+                        cve_id=impact.get("cve_id"),
+                        provider=llm_provider,
+                    )
+                    return {**impact, "llm_explanation": explanation}
+                except Exception as e:
+                    logger.warning(f"[Explainer] Failed to explain impact: {e}")
+                    return {**impact, "llm_explanation": {"error": str(e)}}
+
+        # Run all explanations in parallel (with semaphore limiting concurrency)
+        tasks = [explain_one(impact, i) for i, impact in enumerate(impacts)]
+        explained_impacts = await asyncio.gather(*tasks)
 
         logger.info(f"[Explainer] Explained {len(explained_impacts)} impacts")
 

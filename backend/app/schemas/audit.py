@@ -2,8 +2,9 @@
 
 import uuid
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class AuditLogResponse(BaseModel):
@@ -21,6 +22,14 @@ class AuditLogResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+    @field_validator("ip_address", mode="before")
+    @classmethod
+    def convert_ip_address(cls, v: Any) -> str | None:
+        """Convert IP address to string."""
+        if v is None:
+            return None
+        return str(v)
 
 
 class AuditLogQuery(BaseModel):

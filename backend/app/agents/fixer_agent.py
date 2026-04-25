@@ -142,9 +142,17 @@ class FixerAgent(Agent):
             )
 
     async def _generate_fixes(self, context: AgentContext, **kwargs) -> AgentResult:
-        """Generate fixes for all impacts."""
+        """Generate fixes for impacts with optional chunking."""
+        import asyncio
+
         impacts = kwargs.get("impacts", [])
         llm_provider = kwargs.get("llm_provider")
+        max_concurrent = kwargs.get("max_concurrent", 10)  # Parallel LLM calls
+
+        # Chunking support
+        limit = kwargs.get("limit")  # Max impacts to process
+        offset = kwargs.get("offset", 0)  # Starting index
+        severity_filter = kwargs.get("severity")  # Filter by severity: high, medium, low
 
         if not impacts:
             return AgentResult(
@@ -152,6 +160,27 @@ class FixerAgent(Agent):
                 agent_name=self.name,
                 action="generate_fixes",
                 error="No impacts provided. Run impact analysis first.",
+            )
+
+        # Apply severity filter if specified
+        if severity_filter:
+            impacts = [i for i in impacts if i.get("severity") == severity_filter]
+            logger.info(f"[Fixer] Filtered to {len(impacts)} impacts with severity={severity_filter}")
+
+        total_impacts = len(impacts)
+
+        # Apply offset and limit for chunking
+        if offset > 0:
+            impacts = impacts[offset:]
+        if limit and limit > 0:
+            impacts = impacts[:limit]
+
+        if not impacts:
+            return AgentResult(
+                success=False,
+                agent_name=self.name,
+                action="generate_fixes",
+                error=f"No impacts to process (offset={offset}, total={total_impacts})",
             )
 
         if not llm_service.available_providers:
@@ -162,40 +191,44 @@ class FixerAgent(Agent):
                 error="No LLM providers configured.",
             )
 
-        logger.info(f"[Fixer] Generating fixes for {len(impacts)} impacts")
-        impacts_with_fixes = []
+        logger.info(f"[Fixer] Processing {len(impacts)} of {total_impacts} impacts (offset={offset}, limit={limit})")
 
-        for i, impact in enumerate(impacts):
-            logger.info(f"[Fixer] Generating fix {i+1}/{len(impacts)}")
-            try:
-                # Read full file content for context
-                file_path = impact.get("file_path", "")
-                full_content = None
-                if file_path:
-                    try:
-                        full_content = Path(file_path).read_text()
-                    except Exception:
-                        pass
+        # Cache file contents to avoid re-reading
+        file_cache: dict[str, str | None] = {}
 
-                fix = await llm_service.generate_fix(
-                    code_snippet=impact.get("code_snippet", ""),
-                    file_path=file_path,
-                    change_description=impact.get("description", ""),
-                    change_type=impact.get("change_type", ""),
-                    full_file_content=full_content,
-                    provider=llm_provider,
-                )
+        def get_file_content(file_path: str) -> str | None:
+            if file_path not in file_cache:
+                try:
+                    file_cache[file_path] = Path(file_path).read_text()
+                except Exception:
+                    file_cache[file_path] = None
+            return file_cache[file_path]
 
-                impacts_with_fixes.append({
-                    **impact,
-                    "fix": fix,
-                })
-            except Exception as e:
-                logger.warning(f"[Fixer] Failed to generate fix: {e}")
-                impacts_with_fixes.append({
-                    **impact,
-                    "fix": {"error": str(e)},
-                })
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def fix_one(impact: dict, index: int) -> dict:
+            async with semaphore:
+                logger.info(f"[Fixer] Generating fix {index+1}/{len(impacts)}")
+                try:
+                    file_path = impact.get("file_path", "")
+                    full_content = get_file_content(file_path)
+
+                    fix = await llm_service.generate_fix(
+                        code_snippet=impact.get("code_snippet", ""),
+                        file_path=file_path,
+                        change_description=impact.get("description", ""),
+                        change_type=impact.get("change_type", ""),
+                        full_file_content=full_content,
+                        provider=llm_provider,
+                    )
+                    return {**impact, "fix": fix}
+                except Exception as e:
+                    logger.warning(f"[Fixer] Failed to generate fix: {e}")
+                    return {**impact, "fix": {"error": str(e)}}
+
+        # Run all fixes in parallel
+        tasks = [fix_one(impact, i) for i, impact in enumerate(impacts)]
+        impacts_with_fixes = await asyncio.gather(*tasks)
 
         logger.info(f"[Fixer] Generated {len(impacts_with_fixes)} fixes")
 
@@ -205,10 +238,23 @@ class FixerAgent(Agent):
             if i.get("fix") and not i["fix"].get("error")
         )
 
+        # Calculate if there are more impacts to process
+        processed_end = offset + len(impacts_with_fixes)
+        has_more = processed_end < total_impacts
+
         result_data = {
             "total_fixes": len(impacts_with_fixes),
             "successful_fixes": successful_fixes,
             "impacts_with_fixes": impacts_with_fixes,
+            # Pagination info
+            "pagination": {
+                "offset": offset,
+                "limit": limit,
+                "processed": len(impacts_with_fixes),
+                "total_available": total_impacts,
+                "has_more": has_more,
+                "next_offset": processed_end if has_more else None,
+            },
         }
 
         # Publish completion event

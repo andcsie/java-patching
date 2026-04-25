@@ -13,6 +13,7 @@ from app.agents import AgentCapability, AgentContext, agent_registry
 
 logger = logging.getLogger(__name__)
 from app.api.deps import CurrentUser, DbSession
+from app.services.agent_persistence_service import AgentPersistenceService
 from app.services.audit_service import AuditService
 from app.services.repository_service import RepositoryService
 
@@ -48,6 +49,7 @@ class ExecuteRequest(BaseModel):
 
     parameters: dict[str, Any] = Field(default_factory=dict)
     repository_id: uuid.UUID | None = None
+    analysis_id: uuid.UUID | None = None  # Use existing analysis instead of re-running
 
 
 class ExecuteResponse(BaseModel):
@@ -263,6 +265,20 @@ async def execute_action(
         if "repository_path" in str(action.parameters):
             request.parameters["repository_path"] = repo.local_path
 
+    # If analysis_id is provided and no impacts in parameters, load from database
+    if request.analysis_id and "impacts" not in request.parameters:
+        logger.info(f"[AGENT] Loading impacts from analysis: {request.analysis_id}")
+        persistence_service = AgentPersistenceService(db)
+        stored_impacts = await persistence_service.get_impacts_for_agent(request.analysis_id)
+        if stored_impacts:
+            request.parameters["impacts"] = stored_impacts
+            logger.info(f"[AGENT] Loaded {len(stored_impacts)} impacts from database")
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No impacts found for analysis: {request.analysis_id}",
+            )
+
     # Execute the action
     logger.info(f"[AGENT] Executing {agent_name}:{action_name}...")
     result = await agent_registry.execute(
@@ -298,6 +314,65 @@ async def execute_action(
         },
         request=http_request,
     )
+
+    # Persist analysis results to database
+    if result.success and request.repository_id:
+        persistence_service = AgentPersistenceService(db)
+
+        if agent_name == "analysis" and action_name == "analyze_impact":
+            # Save full analysis with impacts
+            try:
+                from_ver = request.parameters.get("from_version", "")
+                to_ver = request.parameters.get("to_version", "")
+                llm_provider = request.parameters.get("llm_provider")
+
+                await persistence_service.save_analysis_result(
+                    repository_id=request.repository_id,
+                    user_id=current_user.id,
+                    from_version=from_ver,
+                    to_version=to_ver,
+                    agent_result=result.to_dict(),
+                    llm_provider=llm_provider,
+                )
+                logger.info(f"[AGENT] Persisted analysis to database")
+            except Exception as e:
+                logger.warning(f"[AGENT] Failed to persist analysis: {e}")
+
+        elif agent_name == "fixer" and action_name == "generate_fixes":
+            # Update existing analysis with fixes
+            try:
+                # Use provided analysis_id or get latest for this repo
+                analysis_id = request.analysis_id
+                if not analysis_id and request.repository_id:
+                    analysis = await persistence_service.get_latest_analysis(request.repository_id)
+                    analysis_id = analysis.id if analysis else None
+
+                if analysis_id and result.data:
+                    await persistence_service.update_impacts_with_fixes(
+                        analysis_id=analysis_id,
+                        impacts_with_fixes=result.data.get("impacts_with_fixes", []),
+                    )
+                    logger.info(f"[AGENT] Persisted fixes to analysis {analysis_id}")
+            except Exception as e:
+                logger.warning(f"[AGENT] Failed to persist fixes: {e}")
+
+        elif agent_name == "patcher" and action_name == "create_patches":
+            # Update existing analysis with patches
+            try:
+                # Use provided analysis_id or get latest for this repo
+                analysis_id = request.analysis_id
+                if not analysis_id and request.repository_id:
+                    analysis = await persistence_service.get_latest_analysis(request.repository_id)
+                    analysis_id = analysis.id if analysis else None
+
+                if analysis_id and result.data:
+                    await persistence_service.update_impacts_with_patches(
+                        analysis_id=analysis_id,
+                        patches=result.data.get("patches", []),
+                    )
+                    logger.info(f"[AGENT] Persisted patches to analysis {analysis_id}")
+            except Exception as e:
+                logger.warning(f"[AGENT] Failed to persist patches: {e}")
 
     return ExecuteResponse(
         success=result.success,

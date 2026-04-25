@@ -50,6 +50,9 @@ export default function RepositoryDetail() {
   const [agentResult, setAgentResult] = useState<AgentResult | null>(null)
   const [runningAgent, setRunningAgent] = useState<string | null>(null)
   const [lastImpacts, setLastImpacts] = useState<Record<string, unknown>[] | null>(null)
+  const [selectedAnalysisId, setSelectedAnalysisId] = useState<string | null>(null)
+  const [fixerLimit, setFixerLimit] = useState<number>(10)  // Chunk size for fixes
+  const [fixerOffset, setFixerOffset] = useState<number>(0)  // Current offset
 
   const { data: providers } = useLLMProviders()
   const { data: analyses } = useAnalyses(id)
@@ -85,24 +88,38 @@ export default function RepositoryDetail() {
   })
 
   // Execute agent action
-  const executeAgent = async (agentName: string, actionName: string, params: Record<string, unknown> = {}) => {
+  const executeAgent = async (
+    agentName: string,
+    actionName: string,
+    params: Record<string, unknown> = {},
+    analysisId?: string
+  ) => {
     setRunningAgent(`${agentName}:${actionName}`)
     setAgentResult(null)
     try {
       const response = await agentsApi.execute(agentName, actionName, {
         repository_id: id,
         parameters: params,
+        analysis_id: analysisId,  // Pass analysis_id if provided
       })
       setAgentResult(response.data)
 
-      // Save impacts for chaining LLM actions
+      // Save impacts and analysis_id for chaining LLM actions
       if (response.data.success && response.data.data) {
         if (actionName === 'analyze_impact' && response.data.data.impacts) {
           setLastImpacts(response.data.data.impacts as Record<string, unknown>[])
+          setFixerOffset(0)  // Reset pagination on new analysis
+          // Invalidate analyses to refresh the list and get new analysis_id
+          queryClient.invalidateQueries({ queryKey: ['analyses', id] })
         } else if (actionName === 'explain_impacts' && response.data.data.impacts) {
           setLastImpacts(response.data.data.impacts as Record<string, unknown>[])
         } else if (actionName === 'generate_fixes' && response.data.data.impacts_with_fixes) {
           setLastImpacts(response.data.data.impacts_with_fixes as Record<string, unknown>[])
+          // Update offset for pagination
+          const pagination = response.data.data.pagination as { next_offset?: number } | undefined
+          if (pagination?.next_offset) {
+            setFixerOffset(pagination.next_offset)
+          }
         }
       }
 
@@ -407,7 +424,7 @@ export default function RepositoryDetail() {
             )}
 
             {/* Quick Actions */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <button
                 onClick={() => executeAgent('renovate', 'detect_version', {
                   repository_path: repo.local_path,
@@ -452,6 +469,32 @@ export default function RepositoryDetail() {
                     repository_path: repo.local_path,
                     from_version: from,
                     to_version: to,
+                    llm_provider: selectedProvider || undefined,
+                  })
+                }}
+                disabled={!repo.local_path || runningAgent !== null}
+                className="p-3 bg-yellow-900/30 hover:bg-yellow-900/50 border border-yellow-500/30 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+              >
+                <div className="flex items-center mb-1">
+                  {runningAgent === 'analysis:analyze_impact' ? (
+                    <Loader2 className="h-4 w-4 text-yellow-400 animate-spin mr-2" />
+                  ) : (
+                    <Sparkles className="h-4 w-4 text-yellow-400 mr-2" />
+                  )}
+                  <span className="text-white text-sm font-medium">Analyze Impact</span>
+                </div>
+                <p className="text-xs text-gray-400">Scan code + LLM explanations</p>
+              </button>
+
+              <button
+                onClick={() => {
+                  const from = fromVersion || repo.current_jdk_version || '11.0.18'
+                  const to = toVersion || repo.target_jdk_version || '11.0.22'
+                  executeAgent('analysis', 'analyze_impact', {
+                    repository_path: repo.local_path,
+                    from_version: from,
+                    to_version: to,
+                    skip_llm: true,
                   })
                 }}
                 disabled={!repo.local_path || runningAgent !== null}
@@ -459,13 +502,13 @@ export default function RepositoryDetail() {
               >
                 <div className="flex items-center mb-1">
                   {runningAgent === 'analysis:analyze_impact' ? (
-                    <Loader2 className="h-4 w-4 text-yellow-400 animate-spin mr-2" />
+                    <Loader2 className="h-4 w-4 text-gray-400 animate-spin mr-2" />
                   ) : (
-                    <AlertTriangle className="h-4 w-4 text-yellow-400 mr-2" />
+                    <AlertTriangle className="h-4 w-4 text-gray-400 mr-2" />
                   )}
-                  <span className="text-white text-sm font-medium">Analyze Impact</span>
+                  <span className="text-white text-sm font-medium">Quick Scan</span>
                 </div>
-                <p className="text-xs text-gray-400">Check release notes & scan code</p>
+                <p className="text-xs text-gray-400">Fast mode (no LLM)</p>
               </button>
 
               <button
@@ -492,117 +535,147 @@ export default function RepositoryDetail() {
               </button>
             </div>
 
-            {/* LLM-Powered Actions */}
+            {/* Separate Agent Actions */}
             <div className="border-t border-gray-700 pt-4 mt-4">
-              <div className="flex items-center mb-3">
-                <Sparkles className="h-4 w-4 text-purple-400 mr-2" />
-                <span className="text-sm font-medium text-purple-400">LLM-Powered Analysis</span>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center">
+                  <Sparkles className="h-4 w-4 text-purple-400 mr-2" />
+                  <span className="text-sm font-medium text-purple-400">Code Transformation (Separate Agents)</span>
+                </div>
+                {/* Chunking controls */}
+                <div className="flex items-center space-x-2 text-xs">
+                  <span className="text-gray-400">Batch:</span>
+                  <select
+                    value={fixerLimit}
+                    onChange={(e) => {
+                      setFixerLimit(Number(e.target.value))
+                      setFixerOffset(0)  // Reset offset when changing batch size
+                    }}
+                    className="bg-gray-700 text-white rounded px-2 py-1 text-xs"
+                  >
+                    <option value={5}>5</option>
+                    <option value={10}>10</option>
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                    <option value={0}>All</option>
+                  </select>
+                  {fixerOffset > 0 && (
+                    <button
+                      onClick={() => setFixerOffset(0)}
+                      className="text-blue-400 hover:text-blue-300"
+                    >
+                      Reset
+                    </button>
+                  )}
+                </div>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 <button
                   onClick={() => {
-                    const from = fromVersion || repo.current_jdk_version || '11.0.18'
-                    const to = toVersion || repo.target_jdk_version || '11.0.22'
-                    executeAgent('analysis', 'full_analysis', {
-                      repository_path: repo.local_path,
-                      from_version: from,
-                      to_version: to,
-                    })
-                  }}
-                  disabled={!repo.local_path || runningAgent !== null}
-                  className="p-3 bg-purple-900/30 hover:bg-purple-900/50 border border-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
-                >
-                  <div className="flex items-center mb-1">
-                    {runningAgent === 'analysis:full_analysis' ? (
-                      <Loader2 className="h-4 w-4 text-purple-400 animate-spin mr-2" />
-                    ) : (
-                      <Zap className="h-4 w-4 text-purple-400 mr-2" />
-                    )}
-                    <span className="text-white text-sm font-medium">Full Analysis</span>
-                  </div>
-                  <p className="text-xs text-gray-400">Analyze → Explain → Fix → Patch</p>
-                </button>
-
-                <button
-                  onClick={() => {
-                    if (!lastImpacts) {
-                      toast.error('Run "Analyze Impact" first')
+                    // Use selected analysis from history, or require in-memory impacts
+                    const analysisToUse = selectedAnalysisId || (analyses?.length ? analyses[0]?.id : null)
+                    if (!analysisToUse && !lastImpacts) {
+                      toast.error('Run "Analyze Impact" first or select an analysis from history')
                       return
                     }
-                    executeAgent('analysis', 'explain_impacts', {
-                      impacts: lastImpacts,
-                    })
+                    executeAgent('fixer', 'generate_fixes', {
+                      impacts: lastImpacts || undefined,  // Only pass if we have in-memory
+                      llm_provider: selectedProvider || undefined,
+                      limit: fixerLimit || undefined,  // 0 means no limit
+                      offset: fixerOffset,
+                    }, analysisToUse || undefined)
                   }}
-                  disabled={!lastImpacts || runningAgent !== null}
-                  className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+                  disabled={(!lastImpacts && !selectedAnalysisId && !analyses?.length) || runningAgent !== null}
+                  className="p-3 bg-green-900/30 hover:bg-green-900/50 border border-green-500/30 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
                 >
                   <div className="flex items-center mb-1">
-                    {runningAgent === 'analysis:explain_impacts' ? (
-                      <Loader2 className="h-4 w-4 text-blue-400 animate-spin mr-2" />
-                    ) : (
-                      <Sparkles className="h-4 w-4 text-blue-400 mr-2" />
-                    )}
-                    <span className="text-white text-sm font-medium">Explain Impacts</span>
-                  </div>
-                  <p className="text-xs text-gray-400">LLM explains each risk</p>
-                </button>
-
-                <button
-                  onClick={() => {
-                    if (!lastImpacts) {
-                      toast.error('Run "Analyze Impact" first')
-                      return
-                    }
-                    executeAgent('analysis', 'generate_fixes', {
-                      impacts: lastImpacts,
-                    })
-                  }}
-                  disabled={!lastImpacts || runningAgent !== null}
-                  className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
-                >
-                  <div className="flex items-center mb-1">
-                    {runningAgent === 'analysis:generate_fixes' ? (
+                    {runningAgent === 'fixer:generate_fixes' ? (
                       <Loader2 className="h-4 w-4 text-green-400 animate-spin mr-2" />
                     ) : (
                       <Wand2 className="h-4 w-4 text-green-400 mr-2" />
                     )}
                     <span className="text-white text-sm font-medium">Generate Fixes</span>
                   </div>
-                  <p className="text-xs text-gray-400">LLM suggests code fixes</p>
+                  <p className="text-xs text-gray-400">
+                    {fixerLimit > 0 ? `Process ${fixerLimit} impacts` : 'Process all impacts'}
+                    {fixerOffset > 0 && ` (from #${fixerOffset + 1})`}
+                  </p>
                 </button>
 
                 <button
                   onClick={() => {
-                    if (!lastImpacts) {
-                      toast.error('Run "Generate Fixes" first')
+                    // Use selected analysis from history, or require in-memory impacts
+                    const analysisToUse = selectedAnalysisId || (analyses?.length ? analyses[0]?.id : null)
+                    if (!analysisToUse && !lastImpacts) {
+                      toast.error('Run "Generate Fixes" first or select an analysis from history')
                       return
                     }
-                    executeAgent('analysis', 'create_patch', {
+                    executeAgent('patcher', 'create_patches', {
                       repository_path: repo.local_path,
-                      impacts_with_fixes: lastImpacts,
-                    })
+                      impacts_with_fixes: lastImpacts || undefined,
+                      llm_provider: selectedProvider || undefined,
+                    }, analysisToUse || undefined)
                   }}
-                  disabled={!lastImpacts || runningAgent !== null}
-                  className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+                  disabled={(!lastImpacts && !selectedAnalysisId && !analyses?.length) || runningAgent !== null}
+                  className="p-3 bg-orange-900/30 hover:bg-orange-900/50 border border-orange-500/30 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
                 >
                   <div className="flex items-center mb-1">
-                    {runningAgent === 'analysis:create_patch' ? (
+                    {runningAgent === 'patcher:create_patches' ? (
                       <Loader2 className="h-4 w-4 text-orange-400 animate-spin mr-2" />
                     ) : (
                       <FileCode className="h-4 w-4 text-orange-400 mr-2" />
                     )}
-                    <span className="text-white text-sm font-medium">Create Patch</span>
+                    <span className="text-white text-sm font-medium">Create Patches</span>
                   </div>
                   <p className="text-xs text-gray-400">Generate unified diffs</p>
                 </button>
+
+                <button
+                  onClick={() => {
+                    const from = fromVersion || repo.current_jdk_version || '11.0.18'
+                    const to = toVersion || repo.target_jdk_version || '11.0.22'
+                    executeAgent('orchestrator', 'full_upgrade', {
+                      repository_path: repo.local_path,
+                      from_version: from,
+                      to_version: to,
+                      llm_provider: selectedProvider || undefined,
+                    })
+                  }}
+                  disabled={!repo.local_path || runningAgent !== null}
+                  className="p-3 bg-purple-900/30 hover:bg-purple-900/50 border border-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+                >
+                  <div className="flex items-center mb-1">
+                    {runningAgent === 'orchestrator:full_upgrade' ? (
+                      <Loader2 className="h-4 w-4 text-purple-400 animate-spin mr-2" />
+                    ) : (
+                      <Zap className="h-4 w-4 text-purple-400 mr-2" />
+                    )}
+                    <span className="text-white text-sm font-medium">Full Upgrade</span>
+                  </div>
+                  <p className="text-xs text-gray-400">Orchestrate all agents</p>
+                </button>
               </div>
 
-              {!lastImpacts && (
-                <p className="text-xs text-gray-500 mt-2">
-                  Run "Analyze Impact" first to enable LLM actions
+              <div className="mt-3 p-3 bg-gray-800/50 rounded-lg">
+                <p className="text-xs text-gray-400">
+                  <strong className="text-gray-300">Workflow:</strong> Analyze Impact (+ LLM explanations) → Generate Fixes → Create Patches
                 </p>
-              )}
+                {selectedAnalysisId && (
+                  <p className="text-xs text-blue-400 mt-1">
+                    ✓ Using analysis: {selectedAnalysisId.slice(0, 8)}...
+                  </p>
+                )}
+                {!lastImpacts && !selectedAnalysisId && analyses?.length ? (
+                  <p className="text-xs text-blue-400 mt-1">
+                    ✓ Will use latest analysis from history
+                  </p>
+                ) : !lastImpacts && !selectedAnalysisId && !analyses?.length ? (
+                  <p className="text-xs text-yellow-500 mt-1">
+                    ⚠ Run "Analyze Impact" first to enable fixing and patching
+                  </p>
+                ) : null}
+              </div>
             </div>
 
             {/* More Actions */}
@@ -685,8 +758,36 @@ export default function RepositoryDetail() {
                   </div>
                 )}
 
+                {/* Pagination info for fixer */}
+                {agentResult.data?.pagination && (
+                  <div className="mb-3 p-2 bg-gray-800 rounded">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-gray-300">
+                        Processed {(agentResult.data.pagination as any).processed} of {(agentResult.data.pagination as any).total_available} impacts
+                      </span>
+                      {(agentResult.data.pagination as any).has_more && (
+                        <button
+                          onClick={() => {
+                            const analysisToUse = selectedAnalysisId || (analyses?.length ? analyses[0]?.id : null)
+                            executeAgent('fixer', 'generate_fixes', {
+                              impacts: lastImpacts || undefined,
+                              llm_provider: selectedProvider || undefined,
+                              limit: fixerLimit || undefined,
+                              offset: (agentResult.data!.pagination as any).next_offset,
+                            }, analysisToUse || undefined)
+                          }}
+                          disabled={runningAgent !== null}
+                          className="px-3 py-1 bg-green-600 hover:bg-green-500 text-white text-sm rounded disabled:opacity-50"
+                        >
+                          Continue ({(agentResult.data.pagination as any).total_available - (agentResult.data.pagination as any).next_offset} remaining)
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {agentResult.data && (
-                  <details open className="mt-2">
+                  <details className="mt-2">
                     <summary className="cursor-pointer text-sm text-gray-400 hover:text-gray-300">
                       Result data
                     </summary>
@@ -723,7 +824,17 @@ export default function RepositoryDetail() {
 
       {/* Analysis History */}
       <div className="card">
-        <h2 className="text-lg font-medium text-white mb-4">Analysis History</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-medium text-white">Analysis History</h2>
+          {selectedAnalysisId && (
+            <button
+              onClick={() => setSelectedAnalysisId(null)}
+              className="text-xs text-gray-400 hover:text-white"
+            >
+              Clear selection
+            </button>
+          )}
+        </div>
 
         {analyses?.length === 0 ? (
           <p className="text-gray-400">No analyses yet</p>
@@ -732,17 +843,34 @@ export default function RepositoryDetail() {
             {analyses?.map((analysis: any) => (
               <div
                 key={analysis.id}
-                onClick={() => navigate(`/analyses/${analysis.id}`)}
-                className="p-4 bg-gray-700 rounded-lg hover:bg-gray-600 cursor-pointer"
+                className={`p-4 rounded-lg cursor-pointer transition-all ${
+                  selectedAnalysisId === analysis.id
+                    ? 'bg-blue-900/40 border-2 border-blue-500'
+                    : 'bg-gray-700 hover:bg-gray-600 border-2 border-transparent'
+                }`}
               >
                 <div className="flex items-center justify-between">
-                  <div>
+                  <div
+                    className="flex-1"
+                    onClick={() => {
+                      // Toggle selection
+                      if (selectedAnalysisId === analysis.id) {
+                        setSelectedAnalysisId(null)
+                      } else {
+                        setSelectedAnalysisId(analysis.id)
+                        toast.success('Analysis selected for fixing/patching')
+                      }
+                    }}
+                  >
                     <span className="text-white font-medium">
                       {analysis.from_version} → {analysis.to_version}
                     </span>
                     <span className="ml-2 text-sm text-gray-400">
                       {new Date(analysis.created_at).toLocaleString()}
                     </span>
+                    {selectedAnalysisId === analysis.id && (
+                      <span className="ml-2 text-xs text-blue-400">(selected)</span>
+                    )}
                   </div>
                   <div className="flex items-center space-x-3">
                     <span className="text-sm text-gray-400">
@@ -762,6 +890,15 @@ export default function RepositoryDetail() {
                     >
                       {analysis.status}
                     </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        navigate(`/analyses/${analysis.id}`)
+                      }}
+                      className="text-xs text-blue-400 hover:text-blue-300 px-2"
+                    >
+                      View →
+                    </button>
                   </div>
                 </div>
               </div>

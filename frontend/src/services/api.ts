@@ -206,6 +206,7 @@ export const agentsApi = {
   execute: (agentName: string, actionName: string, params: {
     parameters?: Record<string, unknown>
     repository_id?: string
+    analysis_id?: string  // Use existing analysis instead of re-running
   }) => api.post(`/agents/${agentName}/execute/${actionName}`, params),
 
   executeByCapability: (capability: string, actionName: string, params: {

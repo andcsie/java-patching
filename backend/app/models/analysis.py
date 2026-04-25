@@ -201,6 +201,19 @@ class Impact(Base):
         ARRAY(String),
         nullable=True,
     )
+    # LLM-generated content
+    llm_explanation: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+    llm_fix: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+    patch_content: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
