@@ -1,15 +1,17 @@
 import { useState } from 'react'
 import { Navigate } from 'react-router-dom'
-import { GitBranch, Key, Lock } from 'lucide-react'
+import { GitBranch, Lock, Globe } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
 import LoginForm from './LoginForm'
-import SSHLogin from './SSHLogin'
+import SSOLogin from './SSOLogin'
 
 export default function LoginPage() {
   const { isAuthenticated, isLoading } = useAuth()
-  const [authMethod, setAuthMethod] = useState<'password' | 'ssh'>('password')
+  const [authMethod, setAuthMethod] = useState<'password' | 'sso'>('password')
+  const token = localStorage.getItem('access_token')
 
-  if (isAuthenticated) {
+  // Only redirect if both auth state AND token exist
+  if (isAuthenticated && token) {
     return <Navigate to="/" replace />
   }
 
@@ -42,15 +44,15 @@ export default function LoginPage() {
             Password
           </button>
           <button
-            onClick={() => setAuthMethod('ssh')}
+            onClick={() => setAuthMethod('sso')}
             className={`flex items-center px-4 py-2 rounded-md ${
-              authMethod === 'ssh'
+              authMethod === 'sso'
                 ? 'bg-blue-600 text-white'
                 : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
             }`}
           >
-            <Key className="h-4 w-4 mr-2" />
-            SSH Key
+            <Globe className="h-4 w-4 mr-2" />
+            SSO
           </button>
         </div>
 
@@ -58,7 +60,7 @@ export default function LoginPage() {
           {authMethod === 'password' ? (
             <LoginForm isLoading={isLoading} />
           ) : (
-            <SSHLogin isLoading={isLoading} />
+            <SSOLogin isLoading={isLoading} />
           )}
         </div>
       </div>

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { FileText, User, Clock, Filter } from 'lucide-react'
+import { FileText, Clock, Filter } from 'lucide-react'
 import { auditApi } from '../../services/api'
 
 interface AuditEntry {

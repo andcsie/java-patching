@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     # Default LLM provider (gemini recommended for cost-efficiency)
     default_llm_provider: str = "gemini"
 
+    # SSO Configuration
+    sso_google_client_id: str | None = None
+    sso_google_client_secret: str | None = None
+    sso_github_client_id: str | None = None
+    sso_github_client_secret: str | None = None
+    sso_microsoft_client_id: str | None = None
+    sso_microsoft_client_secret: str | None = None
+    sso_microsoft_tenant_id: str = "common"  # Use 'common' for multi-tenant
+
     # Repository storage
     repos_base_path: str = "/app/repos"
 

@@ -20,7 +20,11 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
-    if (error.response?.status === 401) {
+    const isAuthEndpoint = error.config?.url?.startsWith('/auth/')
+    const isOnLoginPage = window.location.pathname === '/login'
+
+    // Only redirect on 401 if not on login page and not an auth endpoint
+    if (error.response?.status === 401 && !isAuthEndpoint && !isOnLoginPage) {
       localStorage.removeItem('access_token')
       localStorage.removeItem('refresh_token')
       window.location.href = '/login'
@@ -37,11 +41,9 @@ export const authApi = {
   login: (username: string, password: string) =>
     api.post('/auth/login', { username, password }),
 
-  sshChallenge: (username: string) =>
-    api.post('/auth/ssh/challenge', { username }),
-
-  sshVerify: (username: string, challenge: string, signature: string) =>
-    api.post('/auth/ssh/verify', { username, challenge, signature }),
+  // SSO
+  ssoCallback: (provider: string, code: string) =>
+    api.post(`/auth/sso/${provider}/callback`, { code }),
 
   refresh: (refreshToken: string) =>
     api.post('/auth/refresh', null, { params: { refresh_token: refreshToken } }),
@@ -51,12 +53,7 @@ export const authApi = {
   updateMe: (data: {
     email?: string
     password?: string
-    ssh_public_key?: string
-    preferred_auth_method?: string
   }) => api.patch('/auth/me', data),
-
-  switchAuthMethod: (method: string) =>
-    api.post('/auth/me/switch-auth-method', null, { params: { method } }),
 }
 
 // Repositories

@@ -12,8 +12,10 @@ import Settings from './components/Settings'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated)
+  const token = localStorage.getItem('access_token')
 
-  if (!isAuthenticated) {
+  // Must have both auth state and actual token
+  if (!isAuthenticated || !token) {
     return <Navigate to="/login" replace />
   }
 

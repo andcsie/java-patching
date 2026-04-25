@@ -22,6 +22,7 @@ class AuthMethod(StrEnum):
 
     PASSWORD = "password"
     SSH_KEY = "ssh_key"
+    SSO = "sso"
 
 
 class TokenType(StrEnum):

@@ -12,32 +12,95 @@ A multi-agent system for analyzing and managing JDK version upgrades in Java pro
 - **Code Analysis**: AST-based impact analysis using tree-sitter
 - **Audit Trail**: Complete logging of all actions for compliance
 
+## Prerequisites
+
+- **Python 3.11+**
+- **Docker** (for PostgreSQL)
+- **Git**
+- At least one LLM API key:
+  - Google Gemini (recommended): https://makersuite.google.com/app/apikey
+  - OpenAI: https://platform.openai.com/api-keys
+  - Anthropic: https://console.anthropic.com/
+  - Or Ollama for self-hosted: https://ollama.ai
+
 ## Quick Start
 
-### 1. Start PostgreSQL
+### TL;DR
 
 ```bash
+# Clone and setup
+git clone <repository-url>
+cd JavaPatching
+python3 -m venv .venv
+source .venv/bin/activate
+cd backend
+pip install -r requirements.txt
+
+# Start database
+cd ..
 docker-compose -f docker-compose.dev.yml up -d
+
+# Configure
+cd backend
+cp .env.example .env
+# Edit .env and add GOOGLE_API_KEY (or another LLM provider key)
+
+# Run migrations and create admin user
+alembic upgrade head
+python scripts/seed_admin.py
+
+# Start server
+uvicorn app.main:app --reload
 ```
 
-### 2. Set Up Backend
+**Default credentials:** `admin` / `admin`
+
+### 1. Clone and Install Dependencies
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd JavaPatching
+
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install backend dependencies
+cd backend
+pip install -r requirements.txt
+
+# Verify installation
+python -c "from app.agents import agent_registry; print('OK')"
+```
+
+### 2. Start PostgreSQL
+
+```bash
+cd ..  # Back to project root
+docker-compose -f docker-compose.dev.yml up -d
+
+# Verify it's running
+docker-compose -f docker-compose.dev.yml ps
+```
+
+### 3. Configure and Run Backend
 
 ```bash
 cd backend
 
-# Create virtual environment (recommended)
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies
-pip install -e .
-
-# Configure environment
+# Create environment file
 cp .env.example .env
-# Edit .env and add your API key (at minimum GOOGLE_API_KEY)
+
+# Edit .env and add your API key
+# At minimum, set one of: GOOGLE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
+nano .env  # or use your preferred editor
 
 # Run database migrations
 alembic upgrade head
+
+# Create default admin user
+python scripts/seed_admin.py
 
 # Start the API server
 uvicorn app.main:app --reload
@@ -45,7 +108,9 @@ uvicorn app.main:app --reload
 
 The API is now running at http://localhost:8000
 
-### 3. Use with Claude Code (MCP)
+**Default login:** `admin` / `admin`
+
+### 4. Use with Claude Code (MCP)
 
 The MCP server is already configured. Restart Claude Code in this directory and the tools will be available:
 

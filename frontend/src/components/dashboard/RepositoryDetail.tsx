@@ -10,7 +10,7 @@ import {
   ArrowLeft,
   AlertTriangle,
 } from 'lucide-react'
-import { repoApi, impactApi } from '../../services/api'
+import { repoApi } from '../../services/api'
 import { useAnalyses, useStartAnalysis } from '../../hooks/useAnalysis'
 import { useLLMProviders } from '../../hooks/useLLMProvider'
 import toast from 'react-hot-toast'

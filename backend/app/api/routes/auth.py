@@ -3,6 +3,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 
 from app.api.deps import AuthServiceDep, CurrentUser, DbSession, get_auth_service
 from app.core.security import AuthMethod
@@ -17,8 +18,16 @@ from app.schemas.user import (
     UserUpdate,
 )
 from app.services.auth_service import AuthService
+from app.services.sso_service import SSOProvider, SSOService
 
 router = APIRouter()
+
+
+class SSOCallbackRequest(BaseModel):
+    """Request body for SSO callback."""
+
+    code: str
+    redirect_uri: str = "http://localhost:3000/login"
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -172,3 +181,70 @@ async def switch_auth_method(
             detail=f"Cannot switch to {method}: not configured",
         )
     return UserResponse.model_validate(current_user)
+
+
+# SSO Routes
+
+@router.get("/sso/providers")
+async def get_sso_providers() -> dict[str, list[str]]:
+    """Get available SSO providers."""
+    return {"providers": SSOService.get_available_providers()}
+
+
+@router.get("/sso/{provider}/authorize")
+async def sso_authorize(
+    provider: str,
+    db: DbSession,
+    redirect_uri: str = "http://localhost:3000/login",
+) -> dict[str, str | None]:
+    """Get SSO authorization URL."""
+    try:
+        sso_provider = SSOProvider(provider)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown SSO provider: {provider}",
+        )
+
+    sso_service = SSOService(db)
+    url = sso_service.get_authorization_url(sso_provider, redirect_uri)
+
+    if not url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"SSO provider '{provider}' is not configured",
+        )
+
+    return {"authorization_url": url}
+
+
+@router.post("/sso/{provider}/callback", response_model=Token)
+async def sso_callback(
+    provider: str,
+    request: SSOCallbackRequest,
+    db: DbSession,
+    auth_service: AuthServiceDep,
+) -> Token:
+    """Handle SSO callback and exchange code for tokens."""
+    try:
+        sso_provider = SSOProvider(provider)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown SSO provider: {provider}",
+        )
+
+    sso_service = SSOService(db)
+    user_info = await sso_service.exchange_code(sso_provider, request.code, request.redirect_uri)
+
+    if not user_info:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Failed to authenticate with SSO provider",
+        )
+
+    # Get or create user
+    user = await sso_service.get_or_create_user(user_info)
+
+    # Create tokens
+    return await auth_service.create_tokens(user)

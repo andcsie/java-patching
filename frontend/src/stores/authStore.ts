@@ -8,9 +8,7 @@ interface User {
   email?: string
   is_active: boolean
   is_superuser: boolean
-  preferred_auth_method: string
-  has_password_auth: boolean
-  has_ssh_auth: boolean
+  auth_method?: string
 }
 
 interface AuthState {
@@ -22,7 +20,7 @@ interface AuthState {
   error: string | null
 
   login: (username: string, password: string) => Promise<void>
-  loginWithSSH: (username: string, challenge: string, signature: string) => Promise<void>
+  loginWithSSO: (provider: string, code: string) => Promise<void>
   logout: () => void
   fetchUser: () => Promise<void>
   updateUser: (data: Partial<User>) => void
@@ -64,10 +62,10 @@ export const useAuthStore = create<AuthState>()(
         }
       },
 
-      loginWithSSH: async (username: string, challenge: string, signature: string) => {
+      loginWithSSO: async (provider: string, code: string) => {
         set({ isLoading: true, error: null })
         try {
-          const response = await authApi.sshVerify(username, challenge, signature)
+          const response = await authApi.ssoCallback(provider, code)
           const { access_token, refresh_token } = response.data
 
           localStorage.setItem('access_token', access_token)
@@ -82,7 +80,7 @@ export const useAuthStore = create<AuthState>()(
 
           await get().fetchUser()
         } catch (error: unknown) {
-          const message = error instanceof Error ? error.message : 'SSH authentication failed'
+          const message = error instanceof Error ? error.message : 'SSO authentication failed'
           set({ error: message, isLoading: false })
           throw error
         }
@@ -100,6 +98,11 @@ export const useAuthStore = create<AuthState>()(
       },
 
       fetchUser: async () => {
+        const token = localStorage.getItem('access_token')
+        if (!token) {
+          get().logout()
+          return
+        }
         try {
           const response = await authApi.getMe()
           set({ user: response.data })
@@ -125,6 +128,16 @@ export const useAuthStore = create<AuthState>()(
         isAuthenticated: state.isAuthenticated,
         user: state.user,
       }),
+      onRehydrateStorage: () => (state) => {
+        // Sync persisted state with actual localStorage tokens
+        if (state) {
+          const token = localStorage.getItem('access_token')
+          if (!token && state.isAuthenticated) {
+            // Token was cleared but state says authenticated - fix it
+            state.logout()
+          }
+        }
+      },
     }
   )
 )

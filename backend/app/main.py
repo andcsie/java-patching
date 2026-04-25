@@ -26,6 +26,7 @@ app = FastAPI(
     description="JDK version upgrade impact analyzer with multi-LLM support",
     version="0.1.0",
     lifespan=lifespan,
+    redirect_slashes=False,
 )
 
 # CORS middleware
