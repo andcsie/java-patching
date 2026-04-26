@@ -48,6 +48,7 @@ export default function RepositoryDetail() {
   const [selectedProvider, setSelectedProvider] = useState('')
   const [agentsPanelOpen, setAgentsPanelOpen] = useState(true)
   const [agentResult, setAgentResult] = useState<AgentResult | null>(null)
+  const [agentHistory, setAgentHistory] = useState<AgentResult[]>([])  // Keep history of results
   const [runningAgent, setRunningAgent] = useState<string | null>(null)
   const [lastImpacts, setLastImpacts] = useState<Record<string, unknown>[] | null>(null)
   const [selectedAnalysisId, setSelectedAnalysisId] = useState<string | null>(null)
@@ -95,7 +96,6 @@ export default function RepositoryDetail() {
     analysisId?: string
   ) => {
     setRunningAgent(`${agentName}:${actionName}`)
-    setAgentResult(null)
     try {
       const response = await agentsApi.execute(agentName, actionName, {
         repository_id: id,
@@ -103,6 +103,8 @@ export default function RepositoryDetail() {
         analysis_id: analysisId,  // Pass analysis_id if provided
       })
       setAgentResult(response.data)
+      // Add to history (keep last 5)
+      setAgentHistory(prev => [response.data, ...prev.slice(0, 4)])
 
       // Save impacts and analysis_id for chaining LLM actions
       if (response.data.success && response.data.data) {
@@ -817,6 +819,42 @@ export default function RepositoryDetail() {
                   </div>
                 )}
               </div>
+            )}
+
+            {/* Previous Results */}
+            {agentHistory.length > 1 && (
+              <details className="mt-4">
+                <summary className="cursor-pointer text-sm text-gray-400 hover:text-gray-300">
+                  Previous results ({agentHistory.length - 1})
+                </summary>
+                <div className="mt-2 space-y-2">
+                  {agentHistory.slice(1).map((result, idx) => (
+                    <div
+                      key={idx}
+                      className={`p-3 rounded-lg text-sm ${
+                        result.success ? 'bg-green-900/10 border border-green-500/20' : 'bg-red-900/10 border border-red-500/20'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-gray-300 font-medium">
+                          {result.agent_name}:{result.action}
+                        </span>
+                        <button
+                          onClick={() => setAgentResult(result)}
+                          className="text-xs text-blue-400 hover:text-blue-300"
+                        >
+                          View
+                        </button>
+                      </div>
+                      {result.data?.successful_fixes !== undefined && (
+                        <span className="text-xs text-gray-400">
+                          {result.data.successful_fixes}/{result.data.total_fixes} fixes
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </details>
             )}
           </div>
         )}

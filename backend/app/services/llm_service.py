@@ -203,7 +203,7 @@ class GeminiProvider(LLMProvider):
                 "contents": contents,
                 "generationConfig": {
                     "temperature": kwargs.get("temperature", 0.7),
-                    "maxOutputTokens": kwargs.get("max_tokens", 4096),
+                    "maxOutputTokens": kwargs.get("max_tokens", 8192),
                 },
             }
             if system_instruction:
@@ -239,11 +239,20 @@ class GeminiProvider(LLMProvider):
             if finish_reason == "RECITATION":
                 logger.warning(f"[Gemini] Recitation policy triggered: {candidate}")
                 raise ValueError("Gemini blocked response due to recitation policy")
+            if finish_reason == "MAX_TOKENS":
+                # Try to extract partial content if available
+                if "content" in candidate and "parts" in candidate["content"]:
+                    partial = candidate["content"]["parts"][0].get("text", "")
+                    if partial:
+                        logger.warning(f"[Gemini] Response truncated (MAX_TOKENS), returning partial")
+                        return partial
+                logger.warning(f"[Gemini] MAX_TOKENS with no content: {candidate}")
+                raise ValueError("Gemini response truncated - input too long")
 
             # Extract text from content
             if "content" not in candidate or "parts" not in candidate["content"]:
                 logger.warning(f"[Gemini] Missing content in response: {candidate}")
-                raise ValueError(f"Gemini response missing content: {candidate}")
+                raise ValueError(f"Gemini response missing content (finish_reason: {finish_reason})")
 
             return candidate["content"]["parts"][0]["text"]
 
@@ -267,7 +276,7 @@ class GeminiProvider(LLMProvider):
                 "contents": contents,
                 "generationConfig": {
                     "temperature": kwargs.get("temperature", 0.7),
-                    "maxOutputTokens": kwargs.get("max_tokens", 4096),
+                    "maxOutputTokens": kwargs.get("max_tokens", 8192),
                 },
             }
             if system_instruction:
@@ -574,10 +583,20 @@ Explain the impact on this code.""",
         provider: str | None = None,
     ) -> dict:
         """Generate a code fix for an impacted code pattern."""
+        # Truncate inputs to avoid token limits
+        code_snippet = code_snippet[:500] if code_snippet else ""
+        change_description = change_description[:500] if change_description else ""
+
         context = ""
         if full_file_content:
-            # Include some context but limit size
-            context = f"\n\nFull file context (for imports/class structure):\n```java\n{full_file_content[:2000]}...\n```"
+            # Include minimal context - just imports and class signature
+            lines = full_file_content.split('\n')
+            context_lines = []
+            for line in lines[:50]:  # First 50 lines usually has imports + class def
+                if line.strip().startswith('import ') or line.strip().startswith('package ') or 'class ' in line:
+                    context_lines.append(line)
+            if context_lines:
+                context = f"\n\nFile context:\n```java\n{chr(10).join(context_lines)}\n```"
 
         messages = [
             {
@@ -644,13 +663,36 @@ Generate a fix.""",
         provider: str | None = None,
     ) -> dict:
         """Generate a unified diff patch for a file with multiple fixes."""
+        # Extract fix data - handle nested 'fix' structure from fixer agent
+        def extract_fix_info(impact: dict) -> str:
+            fix_data = impact.get("fix", {})
+            if isinstance(fix_data, dict) and not fix_data.get("error"):
+                fixed_code = fix_data.get("fixed_code", "N/A")
+                explanation = fix_data.get("explanation", "N/A")
+            else:
+                # Fallback to flat structure
+                fixed_code = impact.get("fixed_code", "N/A")
+                explanation = impact.get("explanation", "N/A")
+
+            return (
+                f"Line {impact.get('line_number', '?')}:\n"
+                f"Original code: {impact.get('code_snippet', 'N/A')[:200]}\n"
+                f"Fixed code: {fixed_code}\n"
+                f"Reason: {explanation}"
+            )
+
         fixes_description = "\n\n".join(
-            f"Line {fix.get('line_number', '?')}:\n"
-            f"Original: {fix.get('original_code', 'N/A')}\n"
-            f"Fixed: {fix.get('fixed_code', 'N/A')}\n"
-            f"Reason: {fix.get('explanation', 'N/A')}"
-            for fix in impacts_with_fixes
+            extract_fix_info(fix) for fix in impacts_with_fixes
+            if fix.get("fix") and not fix.get("fix", {}).get("error")
         )
+
+        if not fixes_description.strip():
+            return {
+                "patched_content": original_content,
+                "unified_diff": "",
+                "changes_summary": ["No valid fixes to apply"],
+                "warnings": ["All fixes had errors or were empty"],
+            }
 
         messages = [
             {
