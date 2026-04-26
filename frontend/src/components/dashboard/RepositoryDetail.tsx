@@ -642,10 +642,12 @@ export default function RepositoryDetail() {
                       from_version: from,
                       to_version: to,
                       llm_provider: selectedProvider || undefined,
+                      use_openrewrite: true,
+                      include_version_bump: true,
                     })
                   }}
                   disabled={!repo.local_path || runningAgent !== null}
-                  className="p-3 bg-purple-900/30 hover:bg-purple-900/50 border border-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all"
+                  className="p-3 bg-gradient-to-r from-purple-900/30 to-blue-900/30 hover:from-purple-900/50 hover:to-blue-900/50 border border-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-left transition-all col-span-2 md:col-span-1"
                 >
                   <div className="flex items-center mb-1">
                     {runningAgent === 'orchestrator:full_upgrade' ? (
@@ -653,28 +655,35 @@ export default function RepositoryDetail() {
                     ) : (
                       <Zap className="h-4 w-4 text-purple-400 mr-2" />
                     )}
-                    <span className="text-white text-sm font-medium">Full Upgrade</span>
+                    <span className="text-white text-sm font-medium">🚀 Full Upgrade Pipeline</span>
                   </div>
-                  <p className="text-xs text-gray-400">Orchestrate all agents</p>
+                  <p className="text-xs text-gray-400">
+                    Renovate → Analyze → OpenRewrite → Fix → Patch → Bump
+                  </p>
                 </button>
               </div>
 
-              <div className="mt-3 p-3 bg-gray-800/50 rounded-lg">
-                <p className="text-xs text-gray-400">
-                  <strong className="text-gray-300">Workflow:</strong> Analyze Impact (+ LLM explanations) → Generate Fixes → Create Patches
-                </p>
+              <div className="mt-3 p-3 bg-gray-800/50 rounded-lg space-y-2">
+                <div className="text-xs">
+                  <strong className="text-gray-300">Manual workflow:</strong>
+                  <span className="text-gray-400"> Analyze → Fixes → Patches (step by step)</span>
+                </div>
+                <div className="text-xs">
+                  <strong className="text-purple-300">🚀 Full Upgrade:</strong>
+                  <span className="text-gray-400"> Detect Version → Get Patches → Analyze → Suggest Recipes → LLM Fixes → Patches → Build Bump</span>
+                </div>
                 {selectedAnalysisId && (
-                  <p className="text-xs text-blue-400 mt-1">
+                  <p className="text-xs text-blue-400">
                     ✓ Using analysis: {selectedAnalysisId.slice(0, 8)}...
                   </p>
                 )}
                 {!lastImpacts && !selectedAnalysisId && analyses?.length ? (
-                  <p className="text-xs text-blue-400 mt-1">
+                  <p className="text-xs text-blue-400">
                     ✓ Will use latest analysis from history
                   </p>
                 ) : !lastImpacts && !selectedAnalysisId && !analyses?.length ? (
-                  <p className="text-xs text-yellow-500 mt-1">
-                    ⚠ Run "Analyze Impact" first to enable fixing and patching
+                  <p className="text-xs text-yellow-500">
+                    ⚠ Run "Analyze Impact" or "Full Upgrade" to get started
                   </p>
                 ) : null}
               </div>

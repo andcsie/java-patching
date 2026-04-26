@@ -2,44 +2,113 @@
 
 ## Overview
 
-The JavaPatching backend uses a multi-agent architecture where specialized agents communicate via a central message bus. Each agent has a single responsibility and can be orchestrated into workflows.
+The JavaPatching backend uses a multi-agent architecture where specialized agents communicate via a central message bus. Each agent has a single responsibility and can be orchestrated into workflows for JDK version upgrades.
+
+## Full Upgrade Pipeline (8 Stages)
+
+The recommended way to upgrade JDK versions is using the **Full Upgrade Pipeline** which integrates all agents in a logical order:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           FULL UPGRADE PIPELINE                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Stage 1: DETECT VERSION (Renovate)                                          │
+│  └─ Scans pom.xml/build.gradle for current JDK version                      │
+│                                                                              │
+│  Stage 2: GET AVAILABLE PATCHES (Renovate)                                   │
+│  └─ Queries Adoptium API for available updates                              │
+│                                                                              │
+│  Stage 3: SCAN REPOSITORY (Scanner)                                          │
+│  └─ Finds all Java source files                                             │
+│                                                                              │
+│  Stage 4: ANALYZE IMPACTS (Analysis)                                         │
+│  └─ AST-based code analysis for compatibility issues                        │
+│                                                                              │
+│  Stage 5: SUGGEST RECIPES (OpenRewrite)                                      │
+│  └─ Recommends migration recipes based on version gap                       │
+│                                                                              │
+│  Stage 6: GENERATE LLM FIXES (Fixer)                                         │
+│  └─ AI-powered code fixes for each impact                                   │
+│                                                                              │
+│  Stage 7: CREATE PATCHES (Patcher)                                           │
+│  └─ Generates unified diffs from fixes                                      │
+│                                                                              │
+│  Stage 8: PREVIEW VERSION BUMP (Renovate)                                    │
+│  └─ Shows required changes to build files                                   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Triggering the Pipeline
+
+```http
+POST /api/agents/orchestrator/execute/full_upgrade
+{
+  "repository_id": "uuid",
+  "parameters": {
+    "repository_path": "/path/to/repo",
+    "from_version": "11.0.18",
+    "to_version": "11.0.22",
+    "llm_provider": "gemini",
+    "use_openrewrite": true,
+    "include_version_bump": true
+  }
+}
+```
+
+### Pipeline Output
+
+```json
+{
+  "success": true,
+  "data": {
+    "workflow_id": "uuid",
+    "detected_version": "11.0.18",
+    "available_patches": ["11.0.19", "11.0.20", "11.0.21", "11.0.22"],
+    "risk_score": 35,
+    "risk_level": "medium",
+    "total_impacts": 12,
+    "suggested_recipes": [
+      {"name": "org.openrewrite.java.migrate.UpgradeToJava11", "description": "..."}
+    ],
+    "impacts": [...],
+    "patches": [...],
+    "version_bumps": [{"file": "pom.xml", "diff": "..."}],
+    "stages_completed": ["version_detection", "patch_discovery", "scanning", ...]
+  }
+}
+```
 
 ## Architecture Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        OrchestratorAgent                            │
-│                   (Coordinates Full Workflows)                       │
+│              (Coordinates 8-Stage Full Upgrade Pipeline)            │
 └─────────────────────────┬───────────────────────────────────────────┘
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         AgentBus                                     │
 │              (Pub/Sub Messaging + Event System)                      │
-└─────┬─────────┬─────────┬─────────┬─────────┬───────────────────────┘
-      │         │         │         │         │
-      ▼         ▼         ▼         ▼         ▼
-┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
-│ Scanner │ │ Release │ │ Analysis│ │  Fixer  │ │ Patcher │
-│  Agent  │ │  Notes  │ │  Agent  │ │  Agent  │ │  Agent  │
-│         │ │  Agent  │ │ (+LLM)  │ │  (LLM)  │ │  (LLM)  │
-└─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘
-                              │
-                              │ Analysis includes
-                              │ LLM explanations
-                              ▼
-                    ┌─────────────────┐
-                    │  Impact Agent   │
-                    │ (Code Scanning) │
-                    └─────────────────┘
-      │                                         │
-      │                                         │
-      ▼                                         ▼
-┌─────────────────┐                   ┌─────────────────┐
-│ RenovateAgent   │                   │ OpenRewriteAgent│
-│ (Patch Upgrades)│                   │ (Major Upgrades)│
-│ Adoptium API    │                   │ Dynamic Recipes │
-└─────────────────┘                   └─────────────────┘
+└─────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────────┘
+      │         │         │         │         │         │
+      ▼         ▼         ▼         ▼         ▼         ▼
+┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌───────────┐
+│Renovate │ │ Scanner │ │ Analysis│ │  Fixer  │ │ Patcher │ │OpenRewrite│
+│  Agent  │ │  Agent  │ │  Agent  │ │  Agent  │ │  Agent  │ │  Agent    │
+│         │ │         │ │ (+LLM)  │ │  (LLM)  │ │  (LLM)  │ │           │
+└────┬────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────┬─────┘
+     │                                                             │
+     │  • Detect JDK version                                       │  • Suggest recipes
+     │  • Query Adoptium API                                       │  • Run migrations
+     │  • Preview/apply version bumps                              │  • Dynamic fetching
+     ▼                                                             ▼
+┌─────────────────┐                                    ┌─────────────────┐
+│  Adoptium API   │                                    │   Moderne API   │
+│  (Patch Info)   │                                    │ (Recipe Catalog)│
+└─────────────────┘                                    └─────────────────┘
 ```
 
 ## Agent Responsibilities

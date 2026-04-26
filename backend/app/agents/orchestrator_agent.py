@@ -214,7 +214,17 @@ class OrchestratorAgent(Agent):
             )
 
     async def _full_upgrade(self, context: AgentContext, **kwargs) -> AgentResult:
-        """Run complete upgrade pipeline using specialized agents."""
+        """Run complete upgrade pipeline using specialized agents.
+
+        Integrated workflow:
+        1. Detect Version (Renovate) - Verify current JDK version
+        2. Get Available Patches (Renovate) - Find upgrade targets
+        3. Analyze Impact (Analysis) - Find code compatibility issues
+        4. Suggest Recipes (OpenRewrite) - Find automated migration recipes
+        5. Generate LLM Fixes (Fixer) - AI-powered fixes for remaining issues
+        6. Create Patches (Patcher) - Generate unified diffs
+        7. Preview Version Bump (Renovate) - Show build file changes
+        """
         from app.agents.registry import agent_registry
 
         repo_path = kwargs["repository_path"]
@@ -222,6 +232,7 @@ class OrchestratorAgent(Agent):
         to_version = kwargs["to_version"]
         llm_provider = kwargs.get("llm_provider")
         include_version_bump = kwargs.get("include_version_bump", True)
+        use_openrewrite = kwargs.get("use_openrewrite", True)
 
         # Create workflow context
         workflow = agent_bus.create_workflow(
@@ -244,8 +255,44 @@ class OrchestratorAgent(Agent):
         }
 
         try:
-            # Stage 1: Scan repository
-            logger.info("[Orchestrator] Stage 1/6: Scanning repository...")
+            # Stage 1: Detect current JDK version with Renovate
+            logger.info("[Orchestrator] Stage 1/8: Detecting JDK version...")
+            workflow.current_stage = "version_detection"
+            detected_version = None
+            renovate = agent_registry.get("renovate")
+            if renovate:
+                detect_result = await renovate.execute(
+                    "detect_version",
+                    context,
+                    repository_path=repo_path,
+                )
+                if detect_result.success:
+                    detected_version = detect_result.data.get("detected_version")
+                    workflow.detected_version = detected_version
+                    workflow.completed_stages.append("version_detection")
+                    logger.info(f"[Orchestrator] Detected version: {detected_version}")
+                    # Use detected version if from_version not specified
+                    if detected_version and not from_version:
+                        from_version = detected_version
+
+            # Stage 2: Get available patches from Adoptium
+            logger.info("[Orchestrator] Stage 2/8: Checking available patches...")
+            workflow.current_stage = "patch_discovery"
+            available_patches = []
+            if renovate:
+                patches_result = await renovate.execute(
+                    "get_available_patches",
+                    context,
+                    repository_path=repo_path,
+                )
+                if patches_result.success:
+                    available_patches = patches_result.data.get("available_versions", [])
+                    workflow.available_patches = available_patches
+                    workflow.completed_stages.append("patch_discovery")
+                    logger.info(f"[Orchestrator] Found {len(available_patches)} available patches")
+
+            # Stage 3: Scan repository for Java files
+            logger.info("[Orchestrator] Stage 3/8: Scanning repository...")
             workflow.current_stage = "scanning"
             scanner = agent_registry.get("scanner")
             if scanner:
@@ -259,24 +306,8 @@ class OrchestratorAgent(Agent):
                     workflow.completed_stages.append("scanning")
                     await self._publish_stage_complete("scanner", "scan", scan_result.data, workflow.workflow_id)
 
-            # Stage 2: Fetch release notes
-            logger.info("[Orchestrator] Stage 2/6: Fetching release notes...")
-            workflow.current_stage = "release_notes"
-            release_notes_agent = agent_registry.get("release_notes")
-            if release_notes_agent:
-                notes_result = await release_notes_agent.execute(
-                    "fetch_notes",
-                    context,
-                    from_version=from_version,
-                    to_version=to_version,
-                )
-                if notes_result.success:
-                    workflow.release_notes = notes_result.data.get("changes", [])
-                    workflow.completed_stages.append("release_notes")
-                    await self._publish_stage_complete("release_notes", "fetch", notes_result.data, workflow.workflow_id)
-
-            # Stage 3: Analyze impacts
-            logger.info("[Orchestrator] Stage 3/6: Analyzing impacts...")
+            # Stage 4: Analyze impacts
+            logger.info("[Orchestrator] Stage 4/8: Analyzing code impacts...")
             workflow.current_stage = "impact_analysis"
             impact_agent = agent_registry.get("impact")
             if impact_agent:
@@ -294,9 +325,21 @@ class OrchestratorAgent(Agent):
                     workflow.completed_stages.append("impact_analysis")
                     await self._publish_stage_complete("impact", "analyze", impact_result.data, workflow.workflow_id)
 
-            # If no impacts, skip LLM stages
+            # If no impacts, skip fix stages but still do version bump
             if not workflow.impacts:
-                logger.info("[Orchestrator] No impacts found - skipping LLM stages")
+                logger.info("[Orchestrator] No impacts found - safe to upgrade!")
+                # Still preview version bump if requested
+                version_bumps = []
+                if include_version_bump and renovate:
+                    bump_result = await renovate.execute(
+                        "preview_version_bump",
+                        context,
+                        repository_path=repo_path,
+                        target_version=to_version,
+                    )
+                    if bump_result.success:
+                        version_bumps = bump_result.data.get("changes", [])
+
                 agent_bus.complete_workflow(workflow.workflow_id)
                 return AgentResult(
                     success=True,
@@ -304,58 +347,64 @@ class OrchestratorAgent(Agent):
                     action="full_upgrade",
                     data={
                         "workflow_id": str(workflow.workflow_id),
-                        "message": "No impacts found - code is compatible!",
+                        "message": "No code impacts found - safe to upgrade!",
                         "risk_score": 0,
                         "risk_level": "low",
+                        "detected_version": detected_version,
+                        "available_patches": available_patches,
+                        "version_bumps": version_bumps,
                         "stages_completed": workflow.completed_stages,
                     },
                 )
 
-            # Stage 4: Explain impacts with LLM
-            logger.info("[Orchestrator] Stage 4/6: Explaining impacts with LLM...")
-            workflow.current_stage = "explaining"
-            explainer = agent_registry.get("explainer")
-            if explainer:
-                explain_result = await explainer.execute(
-                    "explain",
-                    context,
-                    impacts=workflow.impacts,
-                    llm_provider=llm_provider,
-                )
-                if explain_result.success:
-                    workflow.explanations = explain_result.data.get("explained_impacts", [])
-                    workflow.completed_stages.append("explaining")
-                    await self._publish_stage_complete("explainer", "explain", explain_result.data, workflow.workflow_id)
+            # Stage 5: Suggest OpenRewrite recipes
+            suggested_recipes = []
+            if use_openrewrite:
+                logger.info("[Orchestrator] Stage 5/8: Suggesting OpenRewrite recipes...")
+                workflow.current_stage = "recipe_suggestion"
+                openrewrite = agent_registry.get("openrewrite")
+                if openrewrite:
+                    from_major = int(from_version.split('.')[0]) if from_version else 11
+                    to_major = int(to_version.split('.')[0]) if to_version else 11
+                    recipe_result = await openrewrite.execute(
+                        "suggest_recipes",
+                        context,
+                        from_version=from_major,
+                        to_version=to_major,
+                    )
+                    if recipe_result.success:
+                        suggested_recipes = recipe_result.data.get("recipes", [])
+                        workflow.suggested_recipes = suggested_recipes
+                        workflow.completed_stages.append("recipe_suggestion")
+                        logger.info(f"[Orchestrator] Suggested {len(suggested_recipes)} OpenRewrite recipes")
 
-            # Stage 5: Generate fixes with LLM
-            logger.info("[Orchestrator] Stage 5/6: Generating fixes with LLM...")
+            # Stage 6: Generate LLM fixes
+            logger.info("[Orchestrator] Stage 6/8: Generating LLM fixes...")
             workflow.current_stage = "fixing"
             fixer = agent_registry.get("fixer")
             if fixer:
-                # Use explained impacts if available, otherwise original impacts
-                impacts_to_fix = workflow.explanations if workflow.explanations else workflow.impacts
                 fix_result = await fixer.execute(
                     "generate_fixes",
                     context,
-                    impacts=impacts_to_fix,
+                    impacts=workflow.impacts,
                     llm_provider=llm_provider,
+                    limit=15,  # Limit to avoid timeout
                 )
                 if fix_result.success:
                     workflow.fixes = fix_result.data.get("impacts_with_fixes", [])
                     workflow.completed_stages.append("fixing")
                     await self._publish_stage_complete("fixer", "fix", fix_result.data, workflow.workflow_id)
 
-            # Stage 6: Create patches
-            logger.info("[Orchestrator] Stage 6/6: Creating patches...")
+            # Stage 7: Create patches
+            logger.info("[Orchestrator] Stage 7/8: Creating patches...")
             workflow.current_stage = "patching"
             patcher = agent_registry.get("patcher")
-            if patcher:
-                impacts_for_patches = workflow.fixes if workflow.fixes else workflow.impacts
+            if patcher and workflow.fixes:
                 patch_result = await patcher.execute(
                     "create_patches",
                     context,
                     repository_path=repo_path,
-                    impacts_with_fixes=impacts_for_patches,
+                    impacts_with_fixes=workflow.fixes,
                     llm_provider=llm_provider,
                 )
                 if patch_result.success:
@@ -363,10 +412,10 @@ class OrchestratorAgent(Agent):
                     workflow.completed_stages.append("patching")
                     await self._publish_stage_complete("patcher", "patch", patch_result.data, workflow.workflow_id)
 
-            # Optional: Version bump with Renovate
+            # Stage 8: Preview version bump with Renovate
             if include_version_bump:
-                logger.info("[Orchestrator] Bonus: Generating version bump...")
-                renovate = agent_registry.get("renovate")
+                logger.info("[Orchestrator] Stage 8/8: Previewing build file changes...")
+                workflow.current_stage = "version_bump"
                 if renovate:
                     bump_result = await renovate.execute(
                         "preview_version_bump",
@@ -392,13 +441,21 @@ class OrchestratorAgent(Agent):
                     "workflow_id": str(workflow.workflow_id),
                     "from_version": from_version,
                     "to_version": to_version,
+                    # Version detection
+                    "detected_version": detected_version,
+                    "available_patches": available_patches,
+                    # Impact analysis
                     "risk_score": workflow.risk_score,
                     "risk_level": workflow.risk_level,
                     "total_impacts": len(workflow.impacts),
+                    # OpenRewrite suggestions
+                    "suggested_recipes": suggested_recipes,
+                    # Fixes and patches
                     "impacts": workflow.fixes if workflow.fixes else workflow.impacts,
-                    "explanations": workflow.explanations,
-                    "patches": workflow.patches,
-                    "version_bumps": workflow.version_bumps,
+                    "patches": getattr(workflow, 'patches', []),
+                    # Build file changes
+                    "version_bumps": getattr(workflow, 'version_bumps', []),
+                    # Progress
                     "stages_completed": workflow.completed_stages,
                 },
             )

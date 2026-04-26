@@ -694,42 +694,46 @@ Generate a fix.""",
                 "warnings": ["All fixes had errors or were empty"],
             }
 
+        # Truncate original content to avoid token limits - just show relevant sections
+        content_lines = original_content.split('\n')
+        truncated_content = '\n'.join(content_lines[:100])  # First 100 lines
+        if len(content_lines) > 100:
+            truncated_content += f"\n... ({len(content_lines) - 100} more lines)"
+
         messages = [
             {
                 "role": "system",
-                "content": """You are a code patch generator. Create a unified diff patch that applies all fixes to a Java file.
+                "content": """You are a code patch generator. Create a unified diff that applies fixes to a Java file.
 
 Provide your response as JSON:
 {
-  "patched_content": "The complete patched file content",
-  "unified_diff": "The unified diff (--- a/file\\n+++ b/file\\n@@ ... @@)",
+  "unified_diff": "--- a/File.java\\n+++ b/File.java\\n@@ -10,5 +10,6 @@\\n context\\n-old line\\n+new line\\n context",
   "changes_summary": ["List of changes made"],
-  "warnings": ["Any warnings about the patch"]
+  "warnings": ["Any warnings"]
 }
 
 Rules:
-- Apply ALL fixes provided
-- Maintain proper Java syntax
-- Preserve formatting and comments where possible
-- Handle overlapping changes gracefully""",
+- Generate ONLY the unified diff, not the full file
+- Use proper unified diff format with @@ line numbers
+- Each hunk should have 2-3 lines of context""",
             },
             {
                 "role": "user",
                 "content": f"""File: {file_path}
 
-Original content:
+File preview (first 100 lines):
 ```java
-{original_content}
+{truncated_content}
 ```
 
 Fixes to apply:
 {fixes_description}
 
-Generate the patched file and unified diff.""",
+Generate ONLY the unified diff patch (not the full file).""",
             },
         ]
 
-        response = await self.complete(messages, provider, temperature=0.1, max_tokens=8192)
+        response = await self.complete(messages, provider, temperature=0.1, max_tokens=4096)
 
         # Parse JSON response
         import json
@@ -740,13 +744,27 @@ Generate the patched file and unified diff.""",
             response = json_match.group(1)
 
         try:
-            return json.loads(response)
+            result = json.loads(response)
+            # Ensure required fields
+            if "unified_diff" not in result:
+                result["unified_diff"] = ""
+            if "changes_summary" not in result:
+                result["changes_summary"] = []
+            if "warnings" not in result:
+                result["warnings"] = []
+            return result
         except json.JSONDecodeError:
+            # Try to extract diff directly from response
+            if "---" in response and "+++" in response:
+                return {
+                    "unified_diff": response,
+                    "changes_summary": ["Extracted diff from response"],
+                    "warnings": [],
+                }
             return {
-                "patched_content": original_content,
                 "unified_diff": "",
                 "changes_summary": ["Failed to generate patch - manual review required"],
-                "warnings": [response[:500]],
+                "warnings": [response[:300]],
             }
 
 
