@@ -247,7 +247,7 @@ JSON:""",
         ]
 
         try:
-            response = await self.llm.complete(messages, llm_provider, temperature=0.1, max_tokens=2048)
+            response = await self.llm.complete(messages, llm_provider, temperature=0.1, max_tokens=8192)
             logger.debug(f"[Analyzer] LLM response: {response[:500]}...")
 
             # Parse response - handle various formats

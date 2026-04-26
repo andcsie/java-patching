@@ -217,6 +217,18 @@ class FixerAgent(Agent):
                         "fixed_code": code_snippet,
                         "explanation": "Import/package statements typically don't need code changes",
                         "skipped": True,
+                        "no_change_needed": True,
+                    }}
+
+                # Skip structural syntax that doesn't need changes
+                structural_patterns = ['}', '{', '};', '{};', '', ');', '()', '{}']
+                if code_snippet in structural_patterns or len(code_snippet) <= 2:
+                    logger.info(f"[Fixer] Skipping structural syntax {index+1}/{len(impacts)}: '{code_snippet}'")
+                    return {**impact, "fix": {
+                        "fixed_code": code_snippet,
+                        "explanation": "Structural syntax does not need changes",
+                        "skipped": True,
+                        "no_change_needed": True,
                     }}
 
                 logger.info(f"[Fixer] Generating fix {index+1}/{len(impacts)}")

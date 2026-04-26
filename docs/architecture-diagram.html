@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Java Patching Application - Architecture</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 40px;
+        }
+
+        h1 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            color: #fff;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 40px;
+        }
+
+        .section {
+            margin-bottom: 60px;
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            color: #4fc3f7;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #4fc3f7;
+        }
+
+        /* Workflow Section */
+        .workflow {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            padding: 30px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+        }
+
+        .workflow-step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px 30px;
+            background: linear-gradient(145deg, #2d2d44, #1f1f2e);
+            border-radius: 12px;
+            min-width: 140px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+
+        .workflow-step:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.4);
+        }
+
+        .workflow-step.step-1 { border-top: 4px solid #ffd54f; }
+        .workflow-step.step-2 { border-top: 4px solid #81c784; }
+        .workflow-step.step-3 { border-top: 4px solid #ffb74d; }
+        .workflow-step.step-4 { border-top: 4px solid #ba68c8; }
+        .workflow-step.step-5 { border-top: 4px solid #4fc3f7; }
+
+        .step-number {
+            font-size: 2rem;
+            margin-bottom: 8px;
+        }
+
+        .step-name {
+            font-weight: 600;
+            font-size: 1.1rem;
+            margin-bottom: 5px;
+        }
+
+        .step-agent {
+            font-size: 0.75rem;
+            color: #888;
+            background: rgba(0,0,0,0.3);
+            padding: 3px 8px;
+            border-radius: 4px;
+        }
+
+        .arrow {
+            font-size: 2rem;
+            color: #555;
+        }
+
+        /* Agents Grid */
+        .agents-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 25px;
+        }
+
+        .agent-card {
+            background: linear-gradient(145deg, #252538, #1a1a28);
+            border-radius: 16px;
+            padding: 25px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+
+        .agent-header {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .agent-icon {
+            width: 50px;
+            height: 50px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+        }
+
+        .agent-icon.analysis { background: linear-gradient(135deg, #ffd54f, #ff8f00); }
+        .agent-icon.fixer { background: linear-gradient(135deg, #81c784, #388e3c); }
+        .agent-icon.patcher { background: linear-gradient(135deg, #ffb74d, #f57c00); }
+        .agent-icon.orchestrator { background: linear-gradient(135deg, #ba68c8, #7b1fa2); }
+        .agent-icon.renovate { background: linear-gradient(135deg, #4fc3f7, #0288d1); }
+        .agent-icon.openrewrite { background: linear-gradient(135deg, #ff8a65, #e64a19); }
+
+        .agent-name {
+            font-size: 1.3rem;
+            font-weight: 600;
+        }
+
+        .agent-desc {
+            font-size: 0.85rem;
+            color: #888;
+        }
+
+        .tools-section {
+            margin-top: 15px;
+        }
+
+        .tools-title {
+            font-size: 0.8rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+
+        .tool {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 10px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+
+        .tool-name {
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 0.85rem;
+            color: #4fc3f7;
+            white-space: nowrap;
+        }
+
+        .tool-desc {
+            font-size: 0.8rem;
+            color: #999;
+        }
+
+        /* System Architecture */
+        .architecture {
+            background: rgba(255,255,255,0.03);
+            border-radius: 16px;
+            padding: 30px;
+        }
+
+        .arch-layer {
+            margin-bottom: 30px;
+        }
+
+        .layer-title {
+            font-size: 0.75rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 15px;
+        }
+
+        .layer-content {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .arch-box {
+            padding: 15px 25px;
+            border-radius: 10px;
+            text-align: center;
+            min-width: 150px;
+        }
+
+        .arch-box.client {
+            background: linear-gradient(135deg, #5c6bc0, #3949ab);
+        }
+
+        .arch-box.api {
+            background: linear-gradient(135deg, #26a69a, #00897b);
+        }
+
+        .arch-box.service {
+            background: linear-gradient(135deg, #7e57c2, #5e35b1);
+        }
+
+        .arch-box.storage {
+            background: linear-gradient(135deg, #ef5350, #e53935);
+        }
+
+        .arch-box.external {
+            background: linear-gradient(135deg, #ffa726, #fb8c00);
+        }
+
+        .arch-box-title {
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .arch-box-sub {
+            font-size: 0.75rem;
+            opacity: 0.8;
+        }
+
+        .connector {
+            display: flex;
+            justify-content: center;
+            padding: 10px 0;
+            color: #444;
+            font-size: 1.5rem;
+        }
+
+        /* Data Flow */
+        .flow-diagram {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            padding: 30px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 16px;
+        }
+
+        .flow-row {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .flow-box {
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .flow-box.input { background: #1565c0; }
+        .flow-box.process { background: #6a1b9a; }
+        .flow-box.output { background: #2e7d32; }
+        .flow-box.storage { background: #c62828; }
+
+        .flow-arrow {
+            color: #555;
+            font-size: 1.2rem;
+        }
+
+        /* LLM Providers */
+        .providers {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .provider {
+            padding: 20px 30px;
+            border-radius: 12px;
+            text-align: center;
+            min-width: 140px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .provider.recommended {
+            border-color: #4caf50;
+            box-shadow: 0 0 20px rgba(76, 175, 80, 0.2);
+        }
+
+        .provider-name {
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .provider-model {
+            font-size: 0.8rem;
+            color: #888;
+            font-family: monospace;
+        }
+
+        .provider-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            background: #4caf50;
+            color: #fff;
+            font-size: 0.7rem;
+            border-radius: 4px;
+            margin-top: 8px;
+        }
+
+        /* Legend */
+        .legend {
+            display: flex;
+            gap: 30px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-top: 20px;
+            padding: 20px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 10px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85rem;
+        }
+
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+        }
+
+        /* Git Integration */
+        .git-flow {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+            padding: 25px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 16px;
+        }
+
+        .git-step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 15px 20px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            min-width: 120px;
+        }
+
+        .git-icon {
+            font-size: 1.5rem;
+            margin-bottom: 8px;
+        }
+
+        .git-label {
+            font-size: 0.85rem;
+            color: #ccc;
+        }
+
+        footer {
+            text-align: center;
+            padding: 40px;
+            color: #555;
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>Java Patching Application</h1>
+    <p class="subtitle">Multi-Agent JDK Upgrade System Architecture</p>
+
+    <!-- Workflow Section -->
+    <div class="section">
+        <h2 class="section-title">Upgrade Workflow (5 Steps)</h2>
+        <div class="workflow">
+            <div class="workflow-step step-1">
+                <span class="step-number">1️⃣</span>
+                <span class="step-name">Analyze</span>
+                <span class="step-agent">Analysis Agent</span>
+            </div>
+            <span class="arrow">→</span>
+            <div class="workflow-step step-2">
+                <span class="step-number">2️⃣</span>
+                <span class="step-name">Fix</span>
+                <span class="step-agent">Fixer Agent</span>
+            </div>
+            <span class="arrow">→</span>
+            <div class="workflow-step step-3">
+                <span class="step-number">3️⃣</span>
+                <span class="step-name">Patch</span>
+                <span class="step-agent">Patcher Agent</span>
+            </div>
+            <span class="arrow">→</span>
+            <div class="workflow-step step-4">
+                <span class="step-number">4️⃣</span>
+                <span class="step-name">Test</span>
+                <span class="step-agent">Patcher Agent</span>
+            </div>
+            <span class="arrow">→</span>
+            <div class="workflow-step step-5">
+                <span class="step-number">5️⃣</span>
+                <span class="step-name">PR</span>
+                <span class="step-agent">Patcher Agent</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Agents Section -->
+    <div class="section">
+        <h2 class="section-title">Agents & Tools</h2>
+        <div class="agents-grid">
+            <!-- Analysis Agent -->
+            <div class="agent-card">
+                <div class="agent-header">
+                    <div class="agent-icon analysis">🔍</div>
+                    <div>
+                        <div class="agent-name">Analysis Agent</div>
+                        <div class="agent-desc">Impact analysis with AST parsing</div>
+                    </div>
+                </div>
+                <div class="tools-section">
+                    <div class="tools-title">Tools / Actions</div>
+                    <div class="tool">
+                        <span class="tool-name">analyze_impact</span>
+                        <span class="tool-desc">Full AST-based impact analysis against release notes</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">explain_impacts</span>
+                        <span class="tool-desc">Add LLM-generated explanations to impacts</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">get_release_notes</span>
+                        <span class="tool-desc">Fetch JDK release notes between versions</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">get_security_advisories</span>
+                        <span class="tool-desc">Get CVEs fixed between versions</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Fixer Agent -->
+            <div class="agent-card">
+                <div class="agent-header">
+                    <div class="agent-icon fixer">🔧</div>
+                    <div>
+                        <div class="agent-name">Fixer Agent</div>
+                        <div class="agent-desc">AI-powered code fix generation</div>
+                    </div>
+                </div>
+                <div class="tools-section">
+                    <div class="tools-title">Tools / Actions</div>
+                    <div class="tool">
+                        <span class="tool-name">generate_fixes</span>
+                        <span class="tool-desc">Generate LLM fixes for all impacts (with batching)</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">generate_single_fix</span>
+                        <span class="tool-desc">Generate fix for a single impact</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">validate_fix</span>
+                        <span class="tool-desc">Validate generated fix syntax</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Patcher Agent -->
+            <div class="agent-card">
+                <div class="agent-header">
+                    <div class="agent-icon patcher">📝</div>
+                    <div>
+                        <div class="agent-name">Patcher Agent</div>
+                        <div class="agent-desc">Patch creation, testing & PR management</div>
+                    </div>
+                </div>
+                <div class="tools-section">
+                    <div class="tools-title">Tools / Actions</div>
+                    <div class="tool">
+                        <span class="tool-name">create_patches</span>
+                        <span class="tool-desc">Generate unified diffs from fixes</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">apply_all_patches</span>
+                        <span class="tool-desc">Apply patches to repository files</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">run_tests</span>
+                        <span class="tool-desc">Run Maven/Gradle tests</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">create_pr</span>
+                        <span class="tool-desc">Create branch, commit, push & PR</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Orchestrator Agent -->
+            <div class="agent-card">
+                <div class="agent-header">
+                    <div class="agent-icon orchestrator">🎭</div>
+                    <div>
+                        <div class="agent-name">Orchestrator Agent</div>
+                        <div class="agent-desc">Full automated upgrade pipeline</div>
+                    </div>
+                </div>
+                <div class="tools-section">
+                    <div class="tools-title">Tools / Actions</div>
+                    <div class="tool">
+                        <span class="tool-name">full_upgrade</span>
+                        <span class="tool-desc">Complete automated upgrade (all 5 steps)</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Renovate Agent -->
+            <div class="agent-card">
+                <div class="agent-header">
+                    <div class="agent-icon renovate">🔄</div>
+                    <div>
+                        <div class="agent-name">Renovate Agent</div>
+                        <div class="agent-desc">Patch-level JDK version management</div>
+                    </div>
+                </div>
+                <div class="tools-section">
+                    <div class="tools-title">Tools / Actions</div>
+                    <div class="tool">
+                        <span class="tool-name">detect_version</span>
+                        <span class="tool-desc">Detect JDK from pom.xml, build.gradle, etc.</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">get_available_patches</span>
+                        <span class="tool-desc">Query Adoptium API for updates</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">preview_version_bump</span>
+                        <span class="tool-desc">Preview version changes as diffs</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">apply_version_bump</span>
+                        <span class="tool-desc">Apply version bump to build files</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- OpenRewrite Agent -->
+            <div class="agent-card">
+                <div class="agent-header">
+                    <div class="agent-icon openrewrite">🍳</div>
+                    <div>
+                        <div class="agent-name">OpenRewrite Agent</div>
+                        <div class="agent-desc">Major version migrations with recipes</div>
+                    </div>
+                </div>
+                <div class="tools-section">
+                    <div class="tools-title">Tools / Actions</div>
+                    <div class="tool">
+                        <span class="tool-name">list_recipes</span>
+                        <span class="tool-desc">List available migration recipes</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">analyze_migration</span>
+                        <span class="tool-desc">Dry-run migration analysis</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">run_recipe</span>
+                        <span class="tool-desc">Execute transformation recipe</span>
+                    </div>
+                    <div class="tool">
+                        <span class="tool-name">suggest_migration_path</span>
+                        <span class="tool-desc">Recommend upgrade path (8→11→17)</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- System Architecture -->
+    <div class="section">
+        <h2 class="section-title">System Architecture</h2>
+        <div class="architecture">
+            <div class="arch-layer">
+                <div class="layer-title">Clients</div>
+                <div class="layer-content">
+                    <div class="arch-box client">
+                        <div class="arch-box-title">Web Frontend</div>
+                        <div class="arch-box-sub">React + TypeScript</div>
+                    </div>
+                    <div class="arch-box client">
+                        <div class="arch-box-title">Claude Code</div>
+                        <div class="arch-box-sub">MCP Client</div>
+                    </div>
+                    <div class="arch-box client">
+                        <div class="arch-box-title">Claude Desktop</div>
+                        <div class="arch-box-sub">MCP Client</div>
+                    </div>
+                    <div class="arch-box client">
+                        <div class="arch-box-title">REST API</div>
+                        <div class="arch-box-sub">HTTP/JSON</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="connector">↓ ↓ ↓ ↓</div>
+
+            <div class="arch-layer">
+                <div class="layer-title">API Layer</div>
+                <div class="layer-content">
+                    <div class="arch-box api">
+                        <div class="arch-box-title">FastAPI</div>
+                        <div class="arch-box-sub">REST Endpoints</div>
+                    </div>
+                    <div class="arch-box api">
+                        <div class="arch-box-title">FastMCP</div>
+                        <div class="arch-box-sub">MCP Server</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="connector">↓ ↓</div>
+
+            <div class="arch-layer">
+                <div class="layer-title">Agent Layer</div>
+                <div class="layer-content">
+                    <div class="arch-box service">
+                        <div class="arch-box-title">Agent Registry</div>
+                        <div class="arch-box-sub">Agent Discovery</div>
+                    </div>
+                    <div class="arch-box service">
+                        <div class="arch-box-title">Agent Bus</div>
+                        <div class="arch-box-sub">Message Passing</div>
+                    </div>
+                    <div class="arch-box service">
+                        <div class="arch-box-title">LLM Service</div>
+                        <div class="arch-box-sub">Multi-Provider</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="connector">↓ ↓ ↓</div>
+
+            <div class="arch-layer">
+                <div class="layer-title">Storage & External</div>
+                <div class="layer-content">
+                    <div class="arch-box storage">
+                        <div class="arch-box-title">PostgreSQL</div>
+                        <div class="arch-box-sub">Persistence</div>
+                    </div>
+                    <div class="arch-box storage">
+                        <div class="arch-box-title">Redis</div>
+                        <div class="arch-box-sub">Cache/Sessions</div>
+                    </div>
+                    <div class="arch-box external">
+                        <div class="arch-box-title">Git Repos</div>
+                        <div class="arch-box-sub">SSH/HTTPS</div>
+                    </div>
+                    <div class="arch-box external">
+                        <div class="arch-box-title">Adoptium API</div>
+                        <div class="arch-box-sub">JDK Versions</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Git/PR Flow -->
+    <div class="section">
+        <h2 class="section-title">Git & PR Flow</h2>
+        <div class="git-flow">
+            <div class="git-step">
+                <span class="git-icon">📥</span>
+                <span class="git-label">Clone Repo</span>
+            </div>
+            <span class="arrow">→</span>
+            <div class="git-step">
+                <span class="git-icon">🔀</span>
+                <span class="git-label">Create Branch</span>
+            </div>
+            <span class="arrow">→</span>
+            <div class="git-step">
+                <span class="git-icon">📝</span>
+                <span class="git-label">Apply Patches</span>
+            </div>
+            <span class="arrow">→</span>
+            <div class="git-step">
+                <span class="git-icon">✅</span>
+                <span class="git-label">Run Tests</span>
+            </div>
+            <span class="arrow">→</span>
+            <div class="git-step">
+                <span class="git-icon">💾</span>
+                <span class="git-label">Commit</span>
+            </div>
+            <span class="arrow">→</span>
+            <div class="git-step">
+                <span class="git-icon">🚀</span>
+                <span class="git-label">Push</span>
+            </div>
+            <span class="arrow">→</span>
+            <div class="git-step">
+                <span class="git-icon">🔗</span>
+                <span class="git-label">Create PR</span>
+            </div>
+        </div>
+        <div class="legend">
+            <div class="legend-item">
+                <span>Supported:</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #333;"></div>
+                <span>GitHub (gh CLI)</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #205081;"></div>
+                <span>Bitbucket (bb CLI)</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #fc6d26;"></div>
+                <span>GitLab (glab CLI)</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- LLM Providers -->
+    <div class="section">
+        <h2 class="section-title">LLM Providers</h2>
+        <div class="providers">
+            <div class="provider recommended">
+                <div class="provider-name">Google Gemini</div>
+                <div class="provider-model">gemini-2.5-flash</div>
+                <div class="provider-badge">Recommended</div>
+            </div>
+            <div class="provider">
+                <div class="provider-name">OpenAI</div>
+                <div class="provider-model">gpt-4-turbo</div>
+            </div>
+            <div class="provider">
+                <div class="provider-name">Anthropic</div>
+                <div class="provider-model">claude-3.5-sonnet</div>
+            </div>
+            <div class="provider">
+                <div class="provider-name">Ollama</div>
+                <div class="provider-model">llama3 (self-hosted)</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Data Flow -->
+    <div class="section">
+        <h2 class="section-title">Data Flow Example: Upgrade Pipeline</h2>
+        <div class="flow-diagram">
+            <div class="flow-row">
+                <div class="flow-box input">📁 Java Repository</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box process">🔍 AST Parser (tree-sitter)</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box output">📋 Impacts List</div>
+            </div>
+            <div class="flow-row">
+                <div class="flow-box output">📋 Impacts</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box process">🤖 LLM (Gemini/GPT/Claude)</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box output">🔧 Fixed Code</div>
+            </div>
+            <div class="flow-row">
+                <div class="flow-box output">🔧 Fixes</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box process">📝 Diff Generator</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box output">📄 Unified Patches</div>
+            </div>
+            <div class="flow-row">
+                <div class="flow-box output">📄 Patches</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box process">🧪 Maven/Gradle Tests</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box output">✅ Test Results</div>
+            </div>
+            <div class="flow-row">
+                <div class="flow-box output">✅ Passed</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box process">🔀 Git Operations</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box storage">🔗 Pull Request</div>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        Java Patching Application &copy; 2024 | Multi-Agent JDK Upgrade System
+    </footer>
+</body>
+</html>

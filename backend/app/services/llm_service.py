@@ -592,28 +592,48 @@ Explain the impact on this code.""",
         import json
         import re
 
-        code_snippet = (code_snippet or "")[:150]
-        change_description = (change_description or "")[:100]
+        original_snippet = code_snippet or ""
+        code_snippet = original_snippet[:300]  # More context
+        change_description = (change_description or "")[:200]
+
+        # Check if the code actually needs fixing
+        # Simple syntax like }, {, etc. usually don't need changes
+        stripped = original_snippet.strip()
+        if stripped in ['}', '{', '};', '{};', '']:
+            return {
+                "fixed_code": original_snippet,
+                "explanation": "No code change needed - this is structural syntax",
+                "no_change_needed": True,
+            }
 
         messages = [
             {
                 "role": "system",
-                "content": """Fix Java code for JDK compatibility. Return JSON:
-{"fixed_code": "COMPLETE LINE HERE", "explanation": "brief explanation"}
+                "content": """You are a Java expert. Analyze if code needs fixing for JDK compatibility.
 
-IMPORTANT: fixed_code must be the COMPLETE LINE of code that will REPLACE the original line.
-- Include the FULL statement (method call, assignment, etc.)
-- Include the semicolon at the end
-- Keep it on ONE LINE
-- Do NOT include just a partial snippet""",
+Return JSON with this format:
+{"fixed_code": "COMPLETE FIXED LINE", "explanation": "what was changed", "no_change_needed": false}
+
+RULES:
+1. If the code does NOT need changes, return: {"fixed_code": "ORIGINAL CODE HERE", "explanation": "No change needed - reason", "no_change_needed": true}
+2. If the code DOES need changes, return the COMPLETE fixed line with the semicolon
+3. Do NOT return partial snippets or method names alone
+4. The fixed_code must be valid Java syntax that can replace the original line""",
             },
             {
                 "role": "user",
-                "content": f"Fix this {change_type} issue:\nOriginal line: {code_snippet}\nProblem: {change_description}\n\nReturn the COMPLETE fixed line that replaces the original.",
+                "content": f"""Analyze this code for JDK compatibility:
+
+File: {file_path}
+Original code: {code_snippet}
+Issue type: {change_type}
+Problem: {change_description}
+
+Does this code need to be changed? If yes, provide the complete fixed line. If no, explain why no change is needed.""",
             },
         ]
 
-        response = await self.complete(messages, provider, temperature=0.1, max_tokens=1024)
+        response = await self.complete(messages, provider, temperature=0.1, max_tokens=4096)
         logger.debug(f"[LLM] generate_fix response: {response[:300]}")
 
         # Clean response
@@ -682,13 +702,23 @@ IMPORTANT: fixed_code must be the COMPLETE LINE of code that will REPLACE the or
             if not isinstance(fix_data, dict):
                 return None
 
+            # Skip fixes that explicitly indicate no change needed
+            if fix_data.get("no_change_needed"):
+                logger.debug(f"[Patch] Skipping no_change_needed fix: {fix_data.get('explanation', 'N/A')}")
+                return None
+
             fixed_code = fix_data.get("fixed_code", "")
             explanation = fix_data.get("explanation", "")
             if not fixed_code:
                 return None
 
-            line_num = impact.get("line_number", 0)
+            # Skip if fixed_code is same as original (no actual change)
             original = impact.get("code_snippet", "")
+            if fixed_code.strip() == original.strip():
+                logger.debug(f"[Patch] Skipping - fixed code same as original")
+                return None
+
+            line_num = impact.get("line_number", 0)
             return (line_num, original, fixed_code, explanation)
 
         # Collect valid fixes
