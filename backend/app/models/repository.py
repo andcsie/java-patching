@@ -2,12 +2,28 @@
 
 import uuid
 from datetime import datetime
+from enum import Enum
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+
+class GitProvider(str, Enum):
+    """Supported git providers."""
+    GITHUB = "github"
+    BITBUCKET = "bitbucket"
+    GITLAB = "gitlab"
+    OTHER = "other"
+
+
+class AuthMethod(str, Enum):
+    """Repository authentication methods."""
+    SSH = "ssh"
+    PAT = "pat"  # Personal Access Token
+    NONE = "none"
 
 
 class Repository(Base):
@@ -49,6 +65,19 @@ class Repository(Base):
         String(50),
         nullable=True,
     )
+    # Git authentication
+    git_provider: Mapped[str] = mapped_column(
+        String(20),
+        default=GitProvider.GITHUB.value,
+    )
+    auth_method: Mapped[str] = mapped_column(
+        String(20),
+        default=AuthMethod.SSH.value,
+    )
+    access_token: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+    )  # Encrypted PAT
     owner_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id"),

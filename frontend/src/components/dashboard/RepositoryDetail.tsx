@@ -39,6 +39,8 @@ interface AgentResult {
   warnings: string[]
   suggested_next_agent: string | null
   suggested_next_action: string | null
+  workflow_id?: string
+  trace_id?: string
 }
 
 export default function RepositoryDetail() {
@@ -95,6 +97,12 @@ export default function RepositoryDetail() {
       setAgentResult(response.data)
       // Add to history (keep last 5)
       setAgentHistory(prev => [response.data, ...prev.slice(0, 4)])
+
+      // Set workflow ID for tracing (auto-show activity feed)
+      if (response.data.workflow_id) {
+        setWorkflowId(response.data.workflow_id)
+        setShowActivityFeed(true)
+      }
 
       // Save impacts and analysis_id for chaining LLM actions
       if (response.data.success && response.data.data) {

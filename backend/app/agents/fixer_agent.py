@@ -226,6 +226,9 @@ class FixerAgent(Agent):
             "offset": offset,
         })
 
+        # Get trace_id for LLM call logging
+        trace_id = self._get_trace_id(context)
+
         # Cache file contents to avoid re-reading
         file_cache: dict[str, str | None] = {}
 
@@ -291,6 +294,8 @@ class FixerAgent(Agent):
                     except Exception as rag_err:
                         logger.debug(f"[Fixer] RAG lookup failed (continuing without): {rag_err}")
 
+                    import time
+                    llm_start = time.time()
                     fix = await llm_service.generate_fix(
                         code_snippet=code_snippet,
                         file_path=file_path,
@@ -301,6 +306,25 @@ class FixerAgent(Agent):
                         similar_fixes=similar_fixes if similar_fixes else None,
                         relevant_release_notes=relevant_notes if relevant_notes else None,
                     )
+                    llm_duration = int((time.time() - llm_start) * 1000)
+
+                    # Log LLM call to trace
+                    if trace_id:
+                        try:
+                            provider_name = llm_provider or "default"
+                            await trace_service.log_llm_call(
+                                trace_id=trace_id,
+                                agent=self.name,
+                                provider=provider_name,
+                                model="generate_fix",
+                                tokens_in=len(code_snippet) // 4,  # Rough estimate
+                                tokens_out=len(str(fix.get("fixed_code", ""))) // 4,
+                                latency_ms=llm_duration,
+                                prompt_summary=f"Fix {change_type}: {description[:50]}...",
+                                response_summary=fix.get("explanation", "")[:100] if fix else None,
+                            )
+                        except Exception:
+                            pass
 
                     # Store successful fix in RAG for future reference
                     if fix and fix.get("fixed_code") and not fix.get("no_change_needed") and not fix.get("error"):

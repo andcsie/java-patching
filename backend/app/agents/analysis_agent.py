@@ -342,13 +342,16 @@ class AnalysisAgent(Agent):
 
     async def _add_llm_explanations(self, impacts: list[dict], llm_provider: str | None, context: AgentContext | None = None) -> list[dict]:
         """Add LLM explanations to impacts in parallel."""
+        import time
         max_concurrent = 10
         semaphore = asyncio.Semaphore(max_concurrent)
+        trace_id = self._get_trace_id(context) if context else None
 
         async def explain_one(impact: dict, index: int) -> dict:
             async with semaphore:
                 logger.info(f"[AnalysisAgent] Explaining impact {index+1}/{len(impacts)}")
                 try:
+                    llm_start = time.time()
                     explanation = await llm_service.explain_impact(
                         code_snippet=impact.get("code_snippet", ""),
                         file_path=impact.get("file_path", ""),
@@ -358,6 +361,25 @@ class AnalysisAgent(Agent):
                         cve_id=impact.get("cve_id"),
                         provider=llm_provider,
                     )
+                    llm_duration = int((time.time() - llm_start) * 1000)
+
+                    # Log LLM call to trace
+                    if trace_id:
+                        try:
+                            await trace_service.log_llm_call(
+                                trace_id=trace_id,
+                                agent=self.name,
+                                provider=llm_provider or "default",
+                                model="explain_impact",
+                                tokens_in=len(impact.get("code_snippet", "")) // 4,
+                                tokens_out=len(str(explanation)) // 4,
+                                latency_ms=llm_duration,
+                                prompt_summary=f"Explain {impact.get('change_type', '')}",
+                                response_summary=explanation.get("explanation", "")[:100] if isinstance(explanation, dict) else str(explanation)[:100],
+                            )
+                        except Exception:
+                            pass
+
                     return {**impact, "llm_explanation": explanation}
                 except Exception as e:
                     logger.warning(f"[AnalysisAgent] Failed to explain impact: {e}")

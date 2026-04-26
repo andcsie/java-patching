@@ -1,7 +1,7 @@
 """Add traces and trace_events tables for agent observability.
 
-Revision ID: 003_add_traces
-Revises: 002_add_llm_fields_to_impacts
+Revision ID: 003
+Revises: 002
 Create Date: 2024-01-15 12:00:00.000000
 """
 
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers
-revision = "003_add_traces"
-down_revision = "002_add_llm_fields_to_impacts"
+revision = "003"
+down_revision = "002"
 branch_labels = None
 depends_on = None
 

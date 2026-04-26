@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { X } from 'lucide-react'
+import { X, Key, GitBranch } from 'lucide-react'
 
 interface Props {
   isOpen: boolean
@@ -11,6 +11,9 @@ interface Props {
     branch?: string
     current_jdk_version?: string
     target_jdk_version?: string
+    git_provider?: string
+    auth_method?: string
+    access_token?: string
   }) => void
   isLoading: boolean
 }
@@ -23,9 +26,29 @@ export default function AddRepositoryModal({ isOpen, onClose, onSubmit, isLoadin
     branch: 'main',
     current_jdk_version: '',
     target_jdk_version: '',
+    git_provider: 'github',
+    auth_method: 'ssh',
+    access_token: '',
   })
 
   if (!isOpen) return null
+
+  // Auto-detect git provider from URL
+  const detectProvider = (url: string): string => {
+    const lower = url.toLowerCase()
+    if (lower.includes('github.com') || lower.includes('github')) return 'github'
+    if (lower.includes('bitbucket.org') || lower.includes('bitbucket')) return 'bitbucket'
+    if (lower.includes('gitlab.com') || lower.includes('gitlab')) return 'gitlab'
+    return 'other'
+  }
+
+  const handleUrlChange = (url: string) => {
+    setFormData({
+      ...formData,
+      url,
+      git_provider: detectProvider(url),
+    })
+  }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -36,6 +59,9 @@ export default function AddRepositoryModal({ isOpen, onClose, onSubmit, isLoadin
       branch: formData.branch || undefined,
       current_jdk_version: formData.current_jdk_version || undefined,
       target_jdk_version: formData.target_jdk_version || undefined,
+      git_provider: formData.git_provider,
+      auth_method: formData.auth_method,
+      access_token: formData.auth_method === 'pat' ? formData.access_token : undefined,
     })
   }
 
@@ -75,13 +101,73 @@ export default function AddRepositoryModal({ isOpen, onClose, onSubmit, isLoadin
                 type="text"
                 required
                 value={formData.url}
-                onChange={(e) => setFormData({ ...formData, url: e.target.value })}
+                onChange={(e) => handleUrlChange(e.target.value)}
                 className="input"
                 placeholder="https://github.com/user/repo.git"
               />
               <p className="text-xs text-gray-500 mt-1">
                 Git URL, or local path: /path/to/repo
               </p>
+            </div>
+
+            {/* Git Authentication */}
+            <div className="border border-gray-700 rounded-lg p-3 space-y-3">
+              <div className="flex items-center gap-2 text-sm font-medium text-gray-300">
+                <Key className="h-4 w-4" />
+                Authentication
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Provider</label>
+                  <select
+                    value={formData.git_provider}
+                    onChange={(e) => setFormData({ ...formData, git_provider: e.target.value })}
+                    className="input text-sm"
+                  >
+                    <option value="github">GitHub</option>
+                    <option value="bitbucket">Bitbucket</option>
+                    <option value="gitlab">GitLab</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Auth Method</label>
+                  <select
+                    value={formData.auth_method}
+                    onChange={(e) => setFormData({ ...formData, auth_method: e.target.value })}
+                    className="input text-sm"
+                  >
+                    <option value="ssh">SSH Key</option>
+                    <option value="pat">Personal Access Token</option>
+                    <option value="none">None (Public)</option>
+                  </select>
+                </div>
+              </div>
+
+              {formData.auth_method === 'pat' && (
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">
+                    Access Token
+                  </label>
+                  <input
+                    type="password"
+                    value={formData.access_token}
+                    onChange={(e) => setFormData({ ...formData, access_token: e.target.value })}
+                    className="input text-sm"
+                    placeholder={
+                      formData.git_provider === 'github' ? 'ghp_xxxx...' :
+                      formData.git_provider === 'bitbucket' ? 'ATBB...' :
+                      'Token...'
+                    }
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    {formData.git_provider === 'github' && 'GitHub: Settings → Developer settings → Personal access tokens'}
+                    {formData.git_provider === 'bitbucket' && 'Bitbucket: Settings → App passwords'}
+                    {formData.git_provider === 'gitlab' && 'GitLab: Settings → Access Tokens'}
+                  </p>
+                </div>
+              )}
             </div>
 
             <div>

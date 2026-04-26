@@ -27,6 +27,15 @@ class RepositoryService:
         repo_data: RepositoryCreate,
     ) -> Repository:
         """Create a new repository record."""
+        # Auto-detect git provider from URL
+        git_provider = self._detect_git_provider(repo_data.url)
+        if hasattr(repo_data, 'git_provider') and repo_data.git_provider:
+            git_provider = repo_data.git_provider.value if hasattr(repo_data.git_provider, 'value') else repo_data.git_provider
+
+        auth_method = "ssh"
+        if hasattr(repo_data, 'auth_method') and repo_data.auth_method:
+            auth_method = repo_data.auth_method.value if hasattr(repo_data.auth_method, 'value') else repo_data.auth_method
+
         repo = Repository(
             name=repo_data.name,
             url=repo_data.url,
@@ -35,11 +44,25 @@ class RepositoryService:
             current_jdk_version=repo_data.current_jdk_version,
             target_jdk_version=repo_data.target_jdk_version,
             owner_id=owner_id,
+            git_provider=git_provider,
+            auth_method=auth_method,
+            access_token=getattr(repo_data, 'access_token', None),
         )
         self.db.add(repo)
         await self.db.commit()
         await self.db.refresh(repo)
         return repo
+
+    def _detect_git_provider(self, url: str) -> str:
+        """Auto-detect git provider from URL."""
+        url_lower = url.lower()
+        if "github.com" in url_lower or "github" in url_lower:
+            return "github"
+        elif "bitbucket.org" in url_lower or "bitbucket" in url_lower:
+            return "bitbucket"
+        elif "gitlab.com" in url_lower or "gitlab" in url_lower:
+            return "gitlab"
+        return "other"
 
     async def get_by_id(self, repo_id: uuid.UUID) -> Repository | None:
         """Get a repository by ID."""
@@ -81,12 +104,12 @@ class RepositoryService:
         if repo.local_path:
             await self._cleanup_local_clone(repo.local_path)
 
-    async def clone(self, repo: Repository, use_ssh: bool = True) -> str:
+    async def clone(self, repo: Repository, use_ssh: bool | None = None) -> str:
         """Clone a repository to local storage.
 
         Args:
             repo: Repository to clone
-            use_ssh: If True, convert HTTPS URLs to SSH format (default: True)
+            use_ssh: If True, use SSH. If False, use HTTPS. If None, auto-detect from auth_method.
         """
         import logging
         logger = logging.getLogger(__name__)
@@ -109,11 +132,19 @@ class RepositoryService:
             else:
                 raise ValueError(f"Local path does not exist: {repo.url}")
 
-        # Convert HTTPS to SSH if requested
+        # Auto-detect auth method if not specified
+        if use_ssh is None:
+            use_ssh = getattr(repo, 'auth_method', 'ssh') == 'ssh'
+
+        # Build clone URL based on auth method
         clone_url = repo.url
         if use_ssh:
             clone_url = self._convert_to_ssh_url(repo.url)
             logger.info(f"Using SSH URL: {clone_url}")
+        elif getattr(repo, 'access_token', None):
+            # Use PAT authentication
+            clone_url = self._build_pat_url(repo.url, repo.access_token, getattr(repo, 'git_provider', 'github'))
+            logger.info(f"Using PAT authentication for {repo.git_provider}")
 
         # Regular git clone
         local_path = self.repos_base_path / str(repo.owner_id) / str(repo.id)
@@ -121,7 +152,7 @@ class RepositoryService:
         # Ensure parent directory exists
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Cloning {clone_url} to {local_path}")
+        logger.info(f"Cloning to {local_path}")
 
         # Clone in a thread pool to avoid blocking
         loop = asyncio.get_event_loop()
@@ -135,9 +166,20 @@ class RepositoryService:
             )
         except Exception as e:
             logger.error(f"Clone failed: {e}")
-            # If SSH failed and we converted, try original URL
-            if use_ssh and clone_url != repo.url:
-                logger.info(f"SSH clone failed, trying original URL: {repo.url}")
+            # If SSH failed, try PAT if available
+            if use_ssh and getattr(repo, 'access_token', None):
+                logger.info(f"SSH clone failed, trying PAT authentication")
+                pat_url = self._build_pat_url(repo.url, repo.access_token, getattr(repo, 'git_provider', 'github'))
+                await loop.run_in_executor(
+                    None,
+                    self._clone_sync,
+                    pat_url,
+                    local_path,
+                    repo.branch,
+                )
+            # If PAT failed, try original URL
+            elif clone_url != repo.url:
+                logger.info(f"Trying original URL: {repo.url}")
                 await loop.run_in_executor(
                     None,
                     self._clone_sync,
@@ -153,6 +195,34 @@ class RepositoryService:
         await self.db.commit()
 
         return str(local_path)
+
+    def _build_pat_url(self, url: str, token: str, provider: str = "github") -> str:
+        """Build URL with PAT authentication embedded.
+
+        Different providers have different formats:
+        - GitHub: https://TOKEN@github.com/user/repo.git
+        - Bitbucket: https://x-token-auth:TOKEN@bitbucket.org/user/repo.git
+        - GitLab: https://oauth2:TOKEN@gitlab.com/user/repo.git
+        """
+        import re
+
+        # Extract host and path from URL
+        match = re.match(r'https?://([^/]+)/(.+?)(?:\.git)?$', url)
+        if not match:
+            return url
+
+        host = match.group(1)
+        path = match.group(2)
+
+        if provider == "bitbucket":
+            # Bitbucket uses x-token-auth format
+            return f"https://x-token-auth:{token}@{host}/{path}.git"
+        elif provider == "gitlab":
+            # GitLab uses oauth2 format
+            return f"https://oauth2:{token}@{host}/{path}.git"
+        else:
+            # GitHub and others use simple token format
+            return f"https://{token}@{host}/{path}.git"
 
     def _convert_to_ssh_url(self, url: str) -> str:
         """Convert HTTPS URL to SSH URL format."""
