@@ -2,11 +2,14 @@
 
 import logging
 from pathlib import Path
+from uuid import UUID
 
 from app.agents.base import Agent, AgentAction, AgentCapability, AgentContext, AgentResult
 from app.agents.bus import AgentMessage, MessageType, agent_bus
 from app.agents.registry import register_agent
 from app.services.llm_service import llm_service
+from app.services.rag_service import rag_service
+from app.services.trace_service import trace_service
 
 logger = logging.getLogger(__name__)
 
@@ -116,8 +119,27 @@ class FixerAgent(Agent):
             ),
         ]
 
+    def _get_trace_id(self, context: AgentContext) -> UUID | None:
+        """Extract trace_id from context if available."""
+        if context and context.metadata:
+            trace_id = context.metadata.get("trace_id")
+            if trace_id:
+                return UUID(trace_id) if isinstance(trace_id, str) else trace_id
+        return None
+
+    async def _log_trace(self, context: AgentContext, message: str, data: dict | None = None) -> None:
+        """Log a trace event if trace_id is available."""
+        trace_id = self._get_trace_id(context)
+        if trace_id:
+            try:
+                await trace_service.log_info(trace_id, self.name, message, data)
+            except Exception as e:
+                logger.debug(f"[Fixer] Failed to log trace: {e}")
+
     async def execute(self, action: str, context: AgentContext, **kwargs) -> AgentResult:
         """Execute a fix generation action."""
+        await self._log_trace(context, f"Starting action: {action}")
+
         try:
             if action == "generate_fixes":
                 return await self._generate_fixes(context, **kwargs)
@@ -134,6 +156,12 @@ class FixerAgent(Agent):
                 )
         except Exception as e:
             logger.error(f"[Fixer] Action {action} failed: {e}")
+            trace_id = self._get_trace_id(context)
+            if trace_id:
+                try:
+                    await trace_service.log_error(trace_id, self.name, str(e))
+                except Exception:
+                    pass
             return AgentResult(
                 success=False,
                 agent_name=self.name,
@@ -192,6 +220,11 @@ class FixerAgent(Agent):
             )
 
         logger.info(f"[Fixer] Processing {len(impacts)} of {total_impacts} impacts (offset={offset}, limit={limit})")
+        await self._log_trace(context, f"Generating fixes for {len(impacts)} impacts", {
+            "total_impacts": total_impacts,
+            "processing": len(impacts),
+            "offset": offset,
+        })
 
         # Cache file contents to avoid re-reading
         file_cache: dict[str, str | None] = {}
@@ -234,15 +267,55 @@ class FixerAgent(Agent):
                 logger.info(f"[Fixer] Generating fix {index+1}/{len(impacts)}")
                 try:
                     file_path = impact.get("file_path", "")
+                    change_type = impact.get("change_type", "")
+                    description = impact.get("description", "")
+
+                    # Query RAG for similar fixes and relevant release notes
+                    similar_fixes = []
+                    relevant_notes = []
+                    try:
+                        await rag_service.initialize()
+                        # Search for similar past fixes
+                        similar_fixes = await rag_service.search_similar_fixes(
+                            code_snippet=code_snippet,
+                            change_type=change_type,
+                            limit=2,
+                        )
+                        # Search for relevant release notes
+                        relevant_notes = await rag_service.search_release_notes(
+                            query=f"{change_type} {description}",
+                            limit=2,
+                        )
+                        if similar_fixes or relevant_notes:
+                            logger.info(f"[Fixer] RAG context: {len(similar_fixes)} similar fixes, {len(relevant_notes)} release notes")
+                    except Exception as rag_err:
+                        logger.debug(f"[Fixer] RAG lookup failed (continuing without): {rag_err}")
 
                     fix = await llm_service.generate_fix(
                         code_snippet=code_snippet,
                         file_path=file_path,
-                        change_description=impact.get("description", ""),
-                        change_type=impact.get("change_type", ""),
+                        change_description=description,
+                        change_type=change_type,
                         full_file_content=None,  # Skip file content to reduce tokens
                         provider=llm_provider,
+                        similar_fixes=similar_fixes if similar_fixes else None,
+                        relevant_release_notes=relevant_notes if relevant_notes else None,
                     )
+
+                    # Store successful fix in RAG for future reference
+                    if fix and fix.get("fixed_code") and not fix.get("no_change_needed") and not fix.get("error"):
+                        try:
+                            await rag_service.index_successful_fix(
+                                original_code=code_snippet,
+                                fixed_code=fix.get("fixed_code", ""),
+                                change_type=change_type,
+                                explanation=fix.get("explanation", ""),
+                                file_path=file_path,
+                            )
+                            logger.debug(f"[Fixer] Stored successful fix in RAG")
+                        except Exception as store_err:
+                            logger.debug(f"[Fixer] Failed to store fix in RAG: {store_err}")
+
                     return {**impact, "fix": fix}
                 except Exception as e:
                     logger.warning(f"[Fixer] Failed to generate fix: {e}")
@@ -259,6 +332,11 @@ class FixerAgent(Agent):
             1 for i in impacts_with_fixes
             if i.get("fix") and not i["fix"].get("error")
         )
+
+        await self._log_trace(context, f"Fix generation complete: {successful_fixes}/{len(impacts_with_fixes)} successful", {
+            "successful_fixes": successful_fixes,
+            "total_fixes": len(impacts_with_fixes),
+        })
 
         # Calculate if there are more impacts to process
         processed_end = offset + len(impacts_with_fixes)
@@ -311,14 +389,53 @@ class FixerAgent(Agent):
             )
 
         try:
+            code_snippet = kwargs.get("code_snippet", "")
+            change_type = kwargs.get("change_type", "")
+            change_description = kwargs.get("change_description", "")
+            file_path = kwargs.get("file_path", "")
+
+            # Query RAG for similar fixes and relevant release notes
+            similar_fixes = []
+            relevant_notes = []
+            try:
+                await rag_service.initialize()
+                similar_fixes = await rag_service.search_similar_fixes(
+                    code_snippet=code_snippet,
+                    change_type=change_type,
+                    limit=3,
+                )
+                relevant_notes = await rag_service.search_release_notes(
+                    query=f"{change_type} {change_description}",
+                    limit=3,
+                )
+                if similar_fixes or relevant_notes:
+                    logger.info(f"[Fixer] RAG context: {len(similar_fixes)} similar fixes, {len(relevant_notes)} release notes")
+            except Exception as rag_err:
+                logger.debug(f"[Fixer] RAG lookup failed: {rag_err}")
+
             fix = await llm_service.generate_fix(
-                code_snippet=kwargs.get("code_snippet", ""),
-                file_path=kwargs.get("file_path", ""),
-                change_description=kwargs.get("change_description", ""),
-                change_type=kwargs.get("change_type", ""),
+                code_snippet=code_snippet,
+                file_path=file_path,
+                change_description=change_description,
+                change_type=change_type,
                 full_file_content=kwargs.get("full_file_content"),
                 provider=llm_provider,
+                similar_fixes=similar_fixes if similar_fixes else None,
+                relevant_release_notes=relevant_notes if relevant_notes else None,
             )
+
+            # Store successful fix in RAG
+            if fix and fix.get("fixed_code") and not fix.get("no_change_needed") and not fix.get("error"):
+                try:
+                    await rag_service.index_successful_fix(
+                        original_code=code_snippet,
+                        fixed_code=fix.get("fixed_code", ""),
+                        change_type=change_type,
+                        explanation=fix.get("explanation", ""),
+                        file_path=file_path,
+                    )
+                except Exception:
+                    pass
 
             return AgentResult(
                 success=True,

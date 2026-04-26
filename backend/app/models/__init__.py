@@ -3,6 +3,7 @@
 from app.models.analysis import Analysis, Impact
 from app.models.audit import AnalysisHistory, AuditLog
 from app.models.repository import Repository
+from app.models.trace import Trace, TraceEvent
 from app.models.user import User
 
 __all__ = [
@@ -12,4 +13,6 @@ __all__ = [
     "Impact",
     "AuditLog",
     "AnalysisHistory",
+    "Trace",
+    "TraceEvent",
 ]

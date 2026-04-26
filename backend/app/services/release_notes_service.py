@@ -34,6 +34,15 @@ class ReleaseNotesService:
         # Short timeout - fail fast if APIs are slow
         self.client = httpx.AsyncClient(timeout=3.0)
         self._change_cache: dict[str, list[JDKChange]] = {}
+        self._rag_service = None  # Lazy loaded
+
+    @property
+    def rag_service(self):
+        """Lazy load RAG service to avoid circular imports."""
+        if self._rag_service is None:
+            from app.services.rag_service import rag_service
+            self._rag_service = rag_service
+        return self._rag_service
 
     async def close(self):
         """Close the HTTP client."""
@@ -90,7 +99,51 @@ class ReleaseNotesService:
                 all_changes.extend(result)
 
         logging.info(f"[ReleaseNotes] Total changes found: {len(all_changes)}")
+
+        # Auto-index to RAG vector database in the background
+        if all_changes:
+            asyncio.create_task(self._index_changes_to_rag(all_changes))
+
         return all_changes
+
+    async def _index_changes_to_rag(self, changes: list[JDKChange]) -> None:
+        """Index fetched release notes to Qdrant vector database.
+
+        This runs in the background and failures are logged but don't affect the main flow.
+        """
+        try:
+            initialized = await self.rag_service.initialize()
+            if not initialized:
+                logging.debug("[ReleaseNotes] RAG not available, skipping auto-indexing")
+                return
+
+            indexed = 0
+            failed = 0
+            for change in changes:
+                try:
+                    result = await self.rag_service.index_release_note(
+                        version=change.version,
+                        change_type=change.change_type.value if hasattr(change.change_type, 'value') else str(change.change_type),
+                        description=change.description,
+                        affected_classes=change.affected_classes,
+                        affected_methods=change.affected_methods,
+                        cve_id=change.cve_id,
+                        migration_notes=change.migration_notes,
+                    )
+                    if result:
+                        indexed += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    failed += 1
+                    logging.debug(f"[ReleaseNotes] Failed to index single change: {e}")
+
+            if indexed > 0:
+                logging.info(f"[ReleaseNotes] Auto-indexed {indexed}/{len(changes)} changes to RAG")
+            if failed > 0:
+                logging.debug(f"[ReleaseNotes] Failed to index {failed} changes (embedding API may be unavailable)")
+        except Exception as e:
+            logging.debug(f"[ReleaseNotes] RAG auto-indexing skipped: {e}")
 
     def _parse_version(self, version: str) -> tuple[int, int, int] | None:
         """Parse a version string like '11.0.18' into (11, 0, 18)."""
@@ -98,6 +151,10 @@ class ReleaseNotesService:
         if not match:
             return None
         return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+    async def get_changes_for_version(self, version: str) -> list[JDKChange]:
+        """Get changes for a specific JDK version (public API)."""
+        return await self._get_version_changes(version)
 
     async def _get_version_changes(self, version: str) -> list[JDKChange]:
         """Get changes for a specific JDK version."""

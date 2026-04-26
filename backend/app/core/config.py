@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     openjdk_release_notes_url: str = "https://openjdk.org/projects/jdk-updates/"
     adoptium_api_url: str = "https://api.adoptium.net/v3"
 
+    # RAG / Qdrant Configuration
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_collection_release_notes: str = "jdk_release_notes"
+    qdrant_collection_fixes: str = "successful_fixes"
+    qdrant_collection_docs: str = "documentation"
+
     @property
     def available_llm_providers(self) -> list[str]:
         """Return list of configured LLM providers."""

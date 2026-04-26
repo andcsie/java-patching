@@ -9,12 +9,14 @@ For fixing and patching, use separate agents:
 import asyncio
 import logging
 from pathlib import Path
+from uuid import UUID
 
 from app.agents.base import Agent, AgentAction, AgentCapability, AgentContext, AgentResult
 from app.agents.registry import register_agent
 from app.services.analyzer_service import analyzer_service
 from app.services.llm_service import llm_service
 from app.services.release_notes_service import release_notes_service
+from app.services.trace_service import trace_service
 
 logger = logging.getLogger(__name__)
 
@@ -138,8 +140,27 @@ class AnalysisAgent(Agent):
             ),
         ]
 
+    def _get_trace_id(self, context: AgentContext) -> UUID | None:
+        """Extract trace_id from context if available."""
+        if context and context.metadata:
+            trace_id = context.metadata.get("trace_id")
+            if trace_id:
+                return UUID(trace_id) if isinstance(trace_id, str) else trace_id
+        return None
+
+    async def _log_trace(self, context: AgentContext, message: str, data: dict | None = None) -> None:
+        """Log a trace event if trace_id is available."""
+        trace_id = self._get_trace_id(context)
+        if trace_id:
+            try:
+                await trace_service.log_info(trace_id, self.name, message, data)
+            except Exception as e:
+                logger.debug(f"[AnalysisAgent] Failed to log trace: {e}")
+
     async def execute(self, action: str, context: AgentContext, **kwargs) -> AgentResult:
         """Execute an analysis action."""
+        await self._log_trace(context, f"Starting action: {action}", {"params": {k: str(v)[:100] for k, v in kwargs.items()}})
+
         try:
             if action == "get_release_notes":
                 return await self._get_release_notes(context, **kwargs)
@@ -158,6 +179,12 @@ class AnalysisAgent(Agent):
                 )
         except Exception as e:
             logger.error(f"[AnalysisAgent] Action {action} failed: {e}")
+            trace_id = self._get_trace_id(context)
+            if trace_id:
+                try:
+                    await trace_service.log_error(trace_id, self.name, str(e))
+                except Exception:
+                    pass
             return AgentResult(
                 success=False,
                 agent_name=self.name,
@@ -226,6 +253,14 @@ class AnalysisAgent(Agent):
         logger.info(f"[AnalysisAgent] Analyzing impact: {repo_path}")
         logger.info(f"[AnalysisAgent] Version range: {from_version} -> {to_version}")
 
+        await self._log_trace(context, f"Analyzing repository for JDK {from_version} → {to_version}", {
+            "repository_path": str(repo_path),
+            "from_version": from_version,
+            "to_version": to_version,
+        })
+
+        await self._log_trace(context, "Fetching JDK release notes...")
+
         result = await analyzer_service.analyze_repository(
             repo_path,
             from_version,
@@ -233,6 +268,12 @@ class AnalysisAgent(Agent):
             llm_provider=llm_provider,
             skip_llm=skip_llm,
         )
+
+        await self._log_trace(context, f"Analysis complete: {len(result.impacts)} impacts found", {
+            "total_impacts": len(result.impacts),
+            "risk_score": result.risk_score,
+            "files_analyzed": result.total_files_analyzed,
+        })
         logger.info(f"[AnalysisAgent] Analysis complete: {len(result.impacts)} impacts, risk_score={result.risk_score}")
 
         if result.error_message:
@@ -262,7 +303,9 @@ class AnalysisAgent(Agent):
         # Add LLM explanations if available and not skipped
         if impacts_data and not skip_llm and llm_service.available_providers:
             logger.info(f"[AnalysisAgent] Adding LLM explanations for {len(impacts_data)} impacts (parallel)")
-            impacts_data = await self._add_llm_explanations(impacts_data, llm_provider)
+            await self._log_trace(context, f"Adding LLM explanations for {len(impacts_data)} impacts...")
+            impacts_data = await self._add_llm_explanations(impacts_data, llm_provider, context)
+            await self._log_trace(context, "LLM explanations complete")
 
         # Suggest next agent based on results
         suggested_next = None
@@ -297,7 +340,7 @@ class AnalysisAgent(Agent):
             suggested_next_action=suggested_action,
         )
 
-    async def _add_llm_explanations(self, impacts: list[dict], llm_provider: str | None) -> list[dict]:
+    async def _add_llm_explanations(self, impacts: list[dict], llm_provider: str | None, context: AgentContext | None = None) -> list[dict]:
         """Add LLM explanations to impacts in parallel."""
         max_concurrent = 10
         semaphore = asyncio.Semaphore(max_concurrent)

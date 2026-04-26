@@ -18,6 +18,8 @@ import {
   Loader2,
   Sparkles,
   Zap,
+  Activity,
+  Database,
 } from 'lucide-react'
 import { repoApi, agentsApi } from '../../services/api'
 import { useAnalyses } from '../../hooks/useAnalysis'
@@ -25,6 +27,8 @@ import { useLLMProviders } from '../../hooks/useLLMProvider'
 import toast from 'react-hot-toast'
 import RiskBadge from '../analysis/RiskBadge'
 import DiffViewer from '../analysis/DiffViewer'
+import { ActivityFeed } from '../trace/ActivityFeed'
+import { KnowledgeBasePanel } from '../rag/KnowledgeBasePanel'
 
 interface AgentResult {
   success: boolean
@@ -54,6 +58,8 @@ export default function RepositoryDetail() {
   const [fixerOffset, setFixerOffset] = useState<number>(0)  // Current offset
   const [pushToRemote, setPushToRemote] = useState<boolean>(false)  // Push branch to remote
   const [createRemotePr, setCreateRemotePr] = useState<boolean>(false)  // Create PR on remote
+  const [showActivityFeed, setShowActivityFeed] = useState<boolean>(false)  // Show activity panel
+  const [workflowId, setWorkflowId] = useState<string | null>(null)  // Current workflow ID for tracing
 
   // Derived state: check if tests passed from agent history
   const testsPassed = agentHistory.some(r => r.action === 'run_tests' && r.success && (r.data as any)?.tests_passed === true)
@@ -285,6 +291,36 @@ export default function RepositoryDetail() {
             <p className="text-white">{repo.local_path ? 'Cloned' : 'Not cloned'}</p>
           </div>
         </div>
+      </div>
+
+      {/* Observability Row - Activity Feed and RAG side by side */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        {/* Activity Feed Panel */}
+        <div className="card">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-medium text-white flex items-center">
+              <Activity className="h-5 w-5 mr-2 text-green-400" />
+              Agent Activity
+            </h3>
+            {workflowId && (
+              <span className="flex items-center text-xs text-green-400">
+                <span className="w-2 h-2 bg-green-500 rounded-full mr-1 animate-pulse" />
+                Live
+              </span>
+            )}
+          </div>
+          {workflowId ? (
+            <ActivityFeed workflowId={workflowId} maxEvents={50} />
+          ) : (
+            <div className="text-center py-8 text-gray-500">
+              <Activity className="h-8 w-8 mx-auto mb-2 opacity-50" />
+              <p className="text-sm">Run an agent action to see activity</p>
+            </div>
+          )}
+        </div>
+
+        {/* RAG Knowledge Base Panel */}
+        <KnowledgeBasePanel />
       </div>
 
       {/* Agents Panel */}

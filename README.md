@@ -17,6 +17,8 @@ A multi-agent system for analyzing and managing JDK version upgrades in Java pro
 - **Git Integration**: SSH/HTTPS cloning, branch creation, push, and PR creation
 - **Test Integration**: Run Maven/Gradle tests before creating PRs
 - **Audit Trail**: Complete logging of all actions for compliance
+- **Agent Tracing**: Real-time activity feed showing what agents are doing
+- **RAG Knowledge Base**: Qdrant-powered semantic search over JDK release notes
 
 ## Prerequisites
 
@@ -44,21 +46,19 @@ A multi-agent system for analyzing and managing JDK version upgrades in Java pro
 git clone <repository-url>
 cd JavaPatching
 
+# Start services (PostgreSQL, Redis, Qdrant)
+docker compose up -d db redis qdrant
+
 # Backend setup
 python3 -m venv .venv
 source .venv/bin/activate
 cd backend
-pip install -r requirements.txt
-
-# Start database
-cd ..
-docker-compose -f docker-compose.dev.yml up -d
+pip install -e .
 
 # Configure backend
-cd backend
 cp .env.example .env
 # Edit .env and add GOOGLE_API_KEY (or another LLM provider key)
-# Also set REPOS_BASE_PATH and REPOS_SCAN_PATH to your local paths
+# Also set REPOS_BASE_PATH to absolute path, e.g., /Users/you/JavaPatching/repos
 
 # Run migrations and create admin user
 alembic upgrade head
@@ -71,12 +71,17 @@ uvicorn app.main:app --reload --port 8000
 cd ../frontend
 npm install
 npm run dev
+
+# Optional: Initialize RAG knowledge base
+curl -X POST http://localhost:8000/api/rag/initialize
+curl -X POST http://localhost:8000/api/rag/ingest/all-release-notes
 ```
 
 **URLs:**
 - Frontend: http://localhost:5173
 - Backend API: http://localhost:8000
 - API Docs: http://localhost:8000/docs
+- Qdrant Dashboard: http://localhost:6333/dashboard
 
 **Default credentials:** `admin` / `admin`
 
@@ -97,15 +102,22 @@ cd backend
 pip install -r requirements.txt
 ```
 
-### 2. Start PostgreSQL
+### 2. Start Services (PostgreSQL, Redis, Qdrant)
 
 ```bash
 cd ..  # Back to project root
-docker-compose -f docker-compose.dev.yml up -d
 
-# Verify it's running
-docker-compose -f docker-compose.dev.yml ps
+# Start required services
+docker compose up -d db redis qdrant
+
+# Verify they're running
+docker compose ps
 ```
+
+This starts:
+- **PostgreSQL** on port 5432 - Main database
+- **Redis** on port 6379 - Caching (optional)
+- **Qdrant** on port 6333 - Vector database for RAG
 
 ### 3. Configure Backend
 
@@ -450,7 +462,30 @@ Check that the backend is running on port 8000 and CORS is configured.
 
 Verify your API key is set correctly in `.env` and the provider is available:
 ```bash
-curl http://localhost:8000/api/agents/llm/providers
+curl http://localhost:8000/api/llm-providers
+```
+
+### Qdrant not connecting
+
+Check Qdrant is running:
+```bash
+docker compose ps qdrant
+curl http://localhost:6333/
+```
+
+Initialize the RAG collections:
+```bash
+curl -X POST http://localhost:8000/api/rag/initialize
+```
+
+### Database migration errors
+
+If you get migration errors, reset the database:
+```bash
+docker compose down -v  # WARNING: This deletes all data
+docker compose up -d db redis qdrant
+cd backend && alembic upgrade head
+python scripts/seed_admin.py
 ```
 
 ## Project Structure

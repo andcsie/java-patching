@@ -13,9 +13,11 @@ from app.agents import AgentCapability, AgentContext, agent_registry
 
 logger = logging.getLogger(__name__)
 from app.api.deps import CurrentUser, DbSession
+from app.models.trace import TraceStatus
 from app.services.agent_persistence_service import AgentPersistenceService
 from app.services.audit_service import AuditService
 from app.services.repository_service import RepositoryService
+from app.services.trace_service import trace_service
 
 router = APIRouter()
 
@@ -63,6 +65,8 @@ class ExecuteResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     suggested_next_agent: str | None = None
     suggested_next_action: str | None = None
+    workflow_id: str | None = None  # For trace subscription
+    trace_id: str | None = None
 
 
 class AgentHealthResponse(BaseModel):
@@ -229,10 +233,31 @@ async def execute_action(
             detail=f"Action not found: {action_name}",
         )
 
-    # Build context
+    # Generate a workflow ID for this execution
+    workflow_id = uuid.uuid4()
+
+    # Start a trace for this agent execution
+    trace = None
+    try:
+        trace = await trace_service.start_trace(
+            workflow_id=workflow_id,
+            repository_id=request.repository_id,
+            user_id=current_user.id,
+            metadata={
+                "agent": agent_name,
+                "action": action_name,
+                "parameters": {k: str(v)[:100] for k, v in request.parameters.items()},
+            },
+        )
+        logger.info(f"[AGENT] Started trace {trace.id} for workflow {workflow_id}")
+    except Exception as e:
+        logger.warning(f"[AGENT] Failed to start trace: {e}")
+
+    # Build context with trace_id
     context = AgentContext(
         user_id=current_user.id,
         session_id=str(uuid.uuid4()),
+        metadata={"trace_id": str(trace.id)} if trace else {},
     )
 
     # If repository_id is provided, get the repository path
@@ -297,6 +322,17 @@ async def execute_action(
             logger.info(f"[AGENT] Result: {data_summary}")
     else:
         logger.error(f"[AGENT] Failed {agent_name}:{action_name} in {elapsed:.2f}s: {result.error}")
+
+    # End the trace
+    if trace:
+        try:
+            await trace_service.end_trace(
+                trace_id=trace.id,
+                status=TraceStatus.COMPLETED if result.success else TraceStatus.FAILED,
+            )
+            logger.info(f"[AGENT] Ended trace {trace.id}")
+        except Exception as e:
+            logger.warning(f"[AGENT] Failed to end trace: {e}")
 
     # Log the action
     audit_service = AuditService(db)
@@ -383,6 +419,8 @@ async def execute_action(
         warnings=result.warnings,
         suggested_next_agent=result.suggested_next_agent,
         suggested_next_action=result.suggested_next_action,
+        workflow_id=str(workflow_id),
+        trace_id=str(trace.id) if trace else None,
     )
 
 

@@ -587,8 +587,21 @@ Explain the impact on this code.""",
         change_type: str,
         full_file_content: str | None = None,
         provider: str | None = None,
+        similar_fixes: list[dict] | None = None,
+        relevant_release_notes: list[dict] | None = None,
     ) -> dict:
-        """Generate a code fix for an impacted code pattern."""
+        """Generate a code fix for an impacted code pattern.
+
+        Args:
+            code_snippet: The code to fix
+            file_path: Path to the file
+            change_description: Description of the JDK change
+            change_type: Type of change (deprecated, removed, etc.)
+            full_file_content: Optional full file content for context
+            provider: LLM provider to use
+            similar_fixes: RAG-retrieved similar past fixes for few-shot learning
+            relevant_release_notes: RAG-retrieved JDK release notes for context
+        """
         import json
         import re
 
@@ -606,10 +619,26 @@ Explain the impact on this code.""",
                 "no_change_needed": True,
             }
 
-        messages = [
-            {
-                "role": "system",
-                "content": """You are a Java expert. Analyze if code needs fixing for JDK compatibility.
+        # Build RAG context section
+        rag_context = ""
+        if similar_fixes:
+            rag_context += "\n\n## Similar Past Fixes (Learn from these examples):\n"
+            for i, fix in enumerate(similar_fixes[:3], 1):
+                rag_context += f"""
+Example {i}:
+- Original: {fix.get('original_code', '')[:150]}
+- Fixed: {fix.get('fixed_code', '')[:150]}
+- Explanation: {fix.get('explanation', '')}
+"""
+
+        if relevant_release_notes:
+            rag_context += "\n\n## Relevant JDK Release Notes:\n"
+            for note in relevant_release_notes[:3]:
+                rag_context += f"""
+- JDK {note.get('version', 'N/A')} ({note.get('change_type', '')}): {note.get('description', '')[:200]}
+"""
+
+        system_content = """You are a Java expert. Analyze if code needs fixing for JDK compatibility.
 
 Return JSON with this format:
 {"fixed_code": "COMPLETE FIXED LINE", "explanation": "what was changed", "no_change_needed": false}
@@ -618,19 +647,21 @@ RULES:
 1. If the code does NOT need changes, return: {"fixed_code": "ORIGINAL CODE HERE", "explanation": "No change needed - reason", "no_change_needed": true}
 2. If the code DOES need changes, return the COMPLETE fixed line with the semicolon
 3. Do NOT return partial snippets or method names alone
-4. The fixed_code must be valid Java syntax that can replace the original line""",
-            },
-            {
-                "role": "user",
-                "content": f"""Analyze this code for JDK compatibility:
+4. The fixed_code must be valid Java syntax that can replace the original line
+5. Learn from similar past fixes if provided - they show patterns that worked before"""
+
+        user_content = f"""Analyze this code for JDK compatibility:
 
 File: {file_path}
 Original code: {code_snippet}
 Issue type: {change_type}
 Problem: {change_description}
+{rag_context}
+Does this code need to be changed? If yes, provide the complete fixed line. If no, explain why no change is needed."""
 
-Does this code need to be changed? If yes, provide the complete fixed line. If no, explain why no change is needed.""",
-            },
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
         ]
 
         response = await self.complete(messages, provider, temperature=0.1, max_tokens=4096)

@@ -76,3 +76,7 @@ class Repository(Base):
         back_populates="repository",
         lazy="selectin",
     )
+    traces: Mapped[list["Trace"]] = relationship(  # noqa: F821
+        back_populates="repository",
+        lazy="selectin",
+    )

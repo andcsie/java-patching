@@ -240,4 +240,44 @@ export const automationApi = {
     }),
 }
 
+// Traces
+export const tracesApi = {
+  list: (params?: { repository_id?: string; limit?: number }) =>
+    api.get('/traces', { params }),
+
+  get: (traceId: string) => api.get(`/traces/${traceId}`),
+
+  getEvents: (traceId: string) => api.get(`/traces/${traceId}/events`),
+
+  getFull: (traceId: string) => api.get(`/traces/${traceId}/full`),
+
+  getByWorkflow: (workflowId: string) => api.get(`/traces/workflow/${workflowId}`),
+}
+
+// RAG Knowledge Base
+export const ragApi = {
+  getStats: () => api.get('/rag/stats'),
+
+  initialize: () => api.post('/rag/initialize'),
+
+  ingestAllReleaseNotes: () => api.post('/rag/ingest/all-release-notes'),
+
+  ingestVersionRange: (fromVersion: string, toVersion: string) =>
+    api.post('/rag/ingest/version-range', { from_version: fromVersion, to_version: toVersion }),
+
+  ingestUrl: (url: string, title?: string, docType?: string, jdkVersions?: string[]) =>
+    api.post('/rag/ingest/url', { url, title, doc_type: docType, jdk_versions: jdkVersions }),
+
+  ingestMigrationGuides: () => api.post('/rag/ingest/migration-guides'),
+
+  search: (query: string, collection: 'release_notes' | 'fixes' | 'docs', limit?: number) =>
+    api.post('/rag/search', { query, collection, limit }),
+
+  searchReleaseNotes: (query: string, version?: string, changeType?: string, limit?: number) =>
+    api.get('/rag/search/release-notes', { params: { query, version, change_type: changeType, limit } }),
+
+  searchFixes: (code: string, changeType?: string, limit?: number) =>
+    api.get('/rag/search/fixes', { params: { code, change_type: changeType, limit } }),
+}
+
 export default api

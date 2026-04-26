@@ -8,7 +8,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import agent, agents, auth, audit, automation, impact, patches, repositories, skills
+from app.api.routes import agent, agents, auth, audit, automation, impact, patches, rag, repositories, skills, traces
 
 # Import agents module to trigger agent registration
 from app.agents import agent_registry  # noqa: F401
@@ -32,6 +32,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
     # Startup
     await init_db()
+
+    # Initialize RAG collections (non-blocking)
+    try:
+        from app.services.rag_service import rag_service
+        await rag_service.initialize()
+        logging.info("[Startup] RAG collections initialized")
+    except Exception as e:
+        logging.warning(f"[Startup] RAG initialization failed (Qdrant may not be running): {e}")
+
     yield
     # Shutdown
     await close_db()
@@ -64,6 +73,8 @@ app.include_router(audit.router, prefix="/api/audit", tags=["Audit"])
 app.include_router(automation.router, prefix="/api/automation", tags=["Automation"])
 app.include_router(skills.router, prefix="/api/skills", tags=["Skills"])
 app.include_router(agents.router, prefix="/api/agents", tags=["Agents"])
+app.include_router(traces.router, prefix="/api", tags=["Traces"])
+app.include_router(rag.router, prefix="/api", tags=["RAG"])
 
 
 @app.get("/api/health")

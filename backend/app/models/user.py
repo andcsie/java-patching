@@ -69,6 +69,10 @@ class User(Base):
         back_populates="user",
         lazy="selectin",
     )
+    traces: Mapped[list["Trace"]] = relationship(  # noqa: F821
+        back_populates="user",
+        lazy="selectin",
+    )
 
     @property
     def has_password_auth(self) -> bool:

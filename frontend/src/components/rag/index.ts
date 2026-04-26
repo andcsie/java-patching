@@ -1,0 +1,1 @@
+export { KnowledgeBasePanel } from './KnowledgeBasePanel'
