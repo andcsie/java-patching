@@ -208,17 +208,27 @@ class FixerAgent(Agent):
 
         async def fix_one(impact: dict, index: int) -> dict:
             async with semaphore:
+                code_snippet = impact.get("code_snippet", "").strip()
+
+                # Skip import statements - they rarely need code fixes
+                if code_snippet.startswith("import ") or code_snippet.startswith("package "):
+                    logger.info(f"[Fixer] Skipping import/package statement {index+1}/{len(impacts)}")
+                    return {**impact, "fix": {
+                        "fixed_code": code_snippet,
+                        "explanation": "Import/package statements typically don't need code changes",
+                        "skipped": True,
+                    }}
+
                 logger.info(f"[Fixer] Generating fix {index+1}/{len(impacts)}")
                 try:
                     file_path = impact.get("file_path", "")
-                    full_content = get_file_content(file_path)
 
                     fix = await llm_service.generate_fix(
-                        code_snippet=impact.get("code_snippet", ""),
+                        code_snippet=code_snippet,
                         file_path=file_path,
                         change_description=impact.get("description", ""),
                         change_type=impact.get("change_type", ""),
-                        full_file_content=full_content,
+                        full_file_content=None,  # Skip file content to reduce tokens
                         provider=llm_provider,
                     )
                     return {**impact, "fix": fix}

@@ -183,8 +183,14 @@ async def clone_repository(
             detail="Not authorized to clone this repository",
         )
 
+    import logging
+    import traceback
+    logger = logging.getLogger(__name__)
+
     try:
+        logger.info(f"Cloning repository: {repo.url} (branch: {repo.branch})")
         local_path = await repo_service.clone(repo)
+        logger.info(f"Clone successful: {local_path}")
 
         await audit_service.log_repository_cloned(
             repository_id=repo.id,
@@ -198,6 +204,8 @@ async def clone_repository(
             status="cloned",
         )
     except Exception as e:
+        logger.error(f"Clone failed: {e}")
+        logger.error(traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to clone repository: {str(e)}",

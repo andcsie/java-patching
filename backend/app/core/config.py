@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-3-5-sonnet-20241022"
 
     google_api_key: str | None = None
-    google_model: str = "gemini-1.5-pro"
+    google_model: str = "gemini-2.5-flash"
 
     # Self-hosted LLM (Ollama or OpenAI-compatible API)
     ollama_base_url: str | None = None  # e.g., http://localhost:11434
@@ -52,8 +52,8 @@ class Settings(BaseSettings):
     sso_microsoft_client_secret: str | None = None
     sso_microsoft_tenant_id: str = "common"  # Use 'common' for multi-tenant
 
-    # Repository storage
-    repos_base_path: str = "/app/repos"
+    # Repository storage (use ./repos for local dev, /app/repos for Docker)
+    repos_base_path: str = "./repos"
 
     # Folder to scan for repositories (auto-discovery)
     repos_scan_path: str | None = None  # e.g., /path/to/projects

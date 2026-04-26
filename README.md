@@ -1,27 +1,39 @@
 # Java Patching Application
 
-A multi-agent system for analyzing and managing JDK version upgrades in Java projects. Features automated patch discovery, major version migration planning, and AI-powered code analysis.
+A multi-agent system for analyzing and managing JDK version upgrades in Java projects. Features automated patch discovery, AI-powered code analysis, fix generation, and PR creation.
 
 ## Features
 
+- **Web UI**: React-based dashboard with 5-step upgrade workflow
 - **Multi-Agent Architecture**: Specialized agents for different tasks
-  - **Renovate Agent**: Patch-level JDK version management (e.g., 11.0.18 → 11.0.22)
-  - **OpenRewrite Agent**: Major version migrations with recipe-based code transformation
+  - **Analysis Agent**: Impact analysis with AST parsing
+  - **Fixer Agent**: AI-powered code fix generation
+  - **Patcher Agent**: Patch creation, testing, and PR management
+  - **Renovate Agent**: Patch-level JDK version management
+  - **OpenRewrite Agent**: Major version migrations with recipes
+  - **Orchestrator Agent**: Full automated upgrade pipeline
 - **MCP Integration**: Works with Claude Code and Claude Desktop via FastMCP
 - **Multi-LLM Support**: Gemini (default), OpenAI, Anthropic Claude, Ollama (self-hosted)
-- **Code Analysis**: AST-based impact analysis using tree-sitter
+- **Git Integration**: SSH/HTTPS cloning, branch creation, push, and PR creation
+- **Test Integration**: Run Maven/Gradle tests before creating PRs
 - **Audit Trail**: Complete logging of all actions for compliance
 
 ## Prerequisites
 
 - **Python 3.11+**
+- **Node.js 18+** (for frontend)
 - **Docker** (for PostgreSQL)
 - **Git**
+- **Maven or Gradle** (for running Java tests)
 - At least one LLM API key:
   - Google Gemini (recommended): https://makersuite.google.com/app/apikey
   - OpenAI: https://platform.openai.com/api-keys
   - Anthropic: https://console.anthropic.com/
   - Or Ollama for self-hosted: https://ollama.ai
+
+**Optional (for automatic PR creation):**
+- GitHub CLI (`gh`): `brew install gh && gh auth login`
+- Or create PRs manually via the provided URL
 
 ## Quick Start
 
@@ -31,6 +43,8 @@ A multi-agent system for analyzing and managing JDK version upgrades in Java pro
 # Clone and setup
 git clone <repository-url>
 cd JavaPatching
+
+# Backend setup
 python3 -m venv .venv
 source .venv/bin/activate
 cd backend
@@ -40,25 +54,37 @@ pip install -r requirements.txt
 cd ..
 docker-compose -f docker-compose.dev.yml up -d
 
-# Configure
+# Configure backend
 cd backend
 cp .env.example .env
 # Edit .env and add GOOGLE_API_KEY (or another LLM provider key)
+# Also set REPOS_BASE_PATH and REPOS_SCAN_PATH to your local paths
 
 # Run migrations and create admin user
 alembic upgrade head
 python scripts/seed_admin.py
 
-# Start server
-uvicorn app.main:app --reload
+# Start backend server
+uvicorn app.main:app --reload --port 8000
+
+# In another terminal - Frontend setup
+cd ../frontend
+npm install
+npm run dev
 ```
+
+**URLs:**
+- Frontend: http://localhost:5173
+- Backend API: http://localhost:8000
+- API Docs: http://localhost:8000/docs
 
 **Default credentials:** `admin` / `admin`
 
-### 1. Clone and Install Dependencies
+## Installation
+
+### 1. Clone and Install Backend
 
 ```bash
-# Clone the repository
 git clone <repository-url>
 cd JavaPatching
 
@@ -69,9 +95,6 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 # Install backend dependencies
 cd backend
 pip install -r requirements.txt
-
-# Verify installation
-python -c "from app.agents import agent_registry; print('OK')"
 ```
 
 ### 2. Start PostgreSQL
@@ -84,35 +107,250 @@ docker-compose -f docker-compose.dev.yml up -d
 docker-compose -f docker-compose.dev.yml ps
 ```
 
-### 3. Configure and Run Backend
+### 3. Configure Backend
 
 ```bash
 cd backend
-
-# Create environment file
 cp .env.example .env
-
-# Edit .env and add your API key
-# At minimum, set one of: GOOGLE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
-nano .env  # or use your preferred editor
-
-# Run database migrations
-alembic upgrade head
-
-# Create default admin user
-python scripts/seed_admin.py
-
-# Start the API server
-uvicorn app.main:app --reload
 ```
 
-The API is now running at http://localhost:8000
+Edit `.env` with your settings:
 
-**Default login:** `admin` / `admin`
+```bash
+# Required: At least one LLM provider
+GOOGLE_API_KEY=your-gemini-api-key        # Recommended
 
-### 4. Use with Claude Code (MCP)
+# Required: Repository storage paths
+REPOS_BASE_PATH=/path/to/JavaPatching/repos
+REPOS_SCAN_PATH=/path/to/your/java/projects  # For auto-discovery
 
-The MCP server is already configured. Restart Claude Code in this directory and the tools will be available:
+# Optional: Additional LLM providers
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+OLLAMA_BASE_URL=http://localhost:11434
+```
+
+Create the repos directory:
+```bash
+mkdir -p /path/to/JavaPatching/repos
+```
+
+### 4. Initialize Database
+
+```bash
+cd backend
+alembic upgrade head
+python scripts/seed_admin.py
+```
+
+### 5. Start Backend
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+### 6. Install and Start Frontend
+
+```bash
+cd ../frontend
+npm install
+npm run dev
+```
+
+The frontend will be available at http://localhost:5173
+
+## Web UI Workflow
+
+The web interface provides a 5-step upgrade workflow:
+
+```
+1. Analyze  →  2. Fix  →  3. Patch  →  4. Test  →  5. PR
+```
+
+### Step-by-Step Guide
+
+1. **Add Repository**: Enter a Git URL (HTTPS or SSH) and clone it
+2. **Set Versions**: Enter the current and target JDK versions (e.g., 11.0.18 → 11.0.22)
+3. **Analyze**: Find compatibility issues between versions
+4. **Fix**: Generate AI-powered code fixes for each issue
+5. **Patch**: Create unified diff patches from the fixes
+6. **Test**: Run Maven/Gradle tests to verify changes compile and pass
+7. **PR**: Create a git branch, commit changes, push, and create a PR
+
+### Options
+
+- **Push**: Push the branch to the remote repository
+- **Create PR**: Create a pull request (requires Push enabled)
+  - If `gh` CLI is installed: Creates PR automatically
+  - Otherwise: Provides a URL to create PR manually
+
+## Configuration
+
+### Environment Variables
+
+Create `backend/.env`:
+
+```bash
+# Application
+APP_NAME="Java Patching Application"
+DEBUG=false
+
+# Database
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/javapatching
+REDIS_URL=redis://localhost:6379
+
+# Authentication
+SECRET_KEY=change-this-to-a-random-secret-key
+JWT_ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=120
+
+# LLM Providers (configure at least one)
+GOOGLE_API_KEY=your-key-here          # Recommended
+GOOGLE_MODEL=gemini-2.5-flash
+
+OPENAI_API_KEY=                        # Optional
+OPENAI_MODEL=gpt-4-turbo
+
+ANTHROPIC_API_KEY=                     # Optional
+ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
+
+OLLAMA_BASE_URL=http://localhost:11434 # Optional (self-hosted)
+OLLAMA_MODEL=llama3
+
+# Default LLM provider
+DEFAULT_LLM_PROVIDER=gemini
+
+# Repository storage
+REPOS_BASE_PATH=/full/path/to/JavaPatching/repos
+REPOS_SCAN_PATH=/full/path/to/your/projects
+```
+
+### Repository Cloning
+
+The application supports both HTTPS and SSH Git URLs:
+
+- **HTTPS**: `https://github.com/user/repo.git`
+- **SSH**: `git@github.com:user/repo.git`
+
+If you only have SSH keys configured, HTTPS URLs will be automatically converted to SSH format.
+
+## Available Agents
+
+### Analysis Agent
+
+Analyzes JDK upgrade impacts using AST parsing.
+
+| Action | Description |
+|--------|-------------|
+| `analyze_impact` | Full AST-based impact analysis |
+| `explain_impacts` | Add LLM explanations to impacts |
+| `get_release_notes` | Fetch JDK release notes |
+| `get_security_advisories` | Get CVEs fixed between versions |
+
+### Fixer Agent
+
+Generates code fixes using LLM.
+
+| Action | Description |
+|--------|-------------|
+| `generate_fixes` | Generate fixes for all impacts |
+| `generate_single_fix` | Generate fix for one impact |
+| `validate_fix` | Validate a generated fix |
+
+### Patcher Agent
+
+Creates patches and manages PRs.
+
+| Action | Description |
+|--------|-------------|
+| `create_patches` | Create unified diffs from fixes |
+| `apply_all_patches` | Apply patches to files |
+| `run_tests` | Run Maven/Gradle tests |
+| `create_pr` | Create branch, commit, push, and PR |
+
+### Renovate Agent
+
+Manages patch-level JDK versions.
+
+| Action | Description |
+|--------|-------------|
+| `detect_version` | Detect JDK from build files |
+| `get_available_patches` | Query Adoptium for updates |
+| `preview_version_bump` | Preview version changes |
+| `apply_version_bump` | Apply version bump |
+
+### OpenRewrite Agent
+
+Handles major version migrations.
+
+| Action | Description |
+|--------|-------------|
+| `list_recipes` | List migration recipes |
+| `analyze_migration` | Dry-run analysis |
+| `run_recipe` | Execute transformation |
+| `suggest_migration_path` | Plan upgrade path |
+
+### Orchestrator Agent
+
+Runs the full upgrade pipeline.
+
+| Action | Description |
+|--------|-------------|
+| `full_upgrade` | Complete automated upgrade |
+
+## API Reference
+
+### Authentication
+
+```bash
+# Login
+curl -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=admin&password=admin"
+
+# Response: {"access_token": "...", "token_type": "bearer"}
+```
+
+### Agents API
+
+```bash
+# List all agents
+curl http://localhost:8000/api/agents
+
+# Execute an action
+curl -X POST http://localhost:8000/api/agents/analysis/execute/analyze_impact \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repository_id": "uuid-here",
+    "parameters": {
+      "from_version": "11.0.18",
+      "to_version": "11.0.22"
+    }
+  }'
+```
+
+### Repositories API
+
+```bash
+# Create repository
+curl -X POST http://localhost:8000/api/repositories \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-project", "url": "git@github.com:user/repo.git"}'
+
+# Clone repository
+curl -X POST http://localhost:8000/api/repositories/{id}/clone \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+## MCP Integration (Claude Code/Desktop)
+
+### Automatic Setup
+
+The `mcp-config.json` is pre-configured. Just restart Claude Code in this directory.
+
+### Available MCP Tools
 
 ```
 detect_jdk_version
@@ -126,133 +364,9 @@ suggest_migration_path
 scan_security_vulnerabilities
 ```
 
-## Services
+### Claude Desktop Configuration
 
-### PostgreSQL Database
-
-```bash
-# Start
-docker-compose -f docker-compose.dev.yml up -d
-
-# Stop
-docker-compose -f docker-compose.dev.yml down
-
-# View logs
-docker-compose -f docker-compose.dev.yml logs -f db
-
-# Reset database (removes all data)
-docker-compose -f docker-compose.dev.yml down -v
-```
-
-### Backend API (FastAPI)
-
-```bash
-cd backend
-
-# Development mode (with auto-reload)
-uvicorn app.main:app --reload --port 8000
-
-# Production mode
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-**Endpoints:**
-- API: http://localhost:8000
-- Docs: http://localhost:8000/docs
-- OpenAPI: http://localhost:8000/openapi.json
-
-### MCP Server (for Claude Code/Desktop)
-
-**Option A: Automatic (via mcp-config.json)**
-
-Already configured - just restart Claude Code in this directory.
-
-**Option B: Manual**
-
-```bash
-cd backend
-python mcp_server.py
-```
-
-**Option C: Using uvx**
-
-```bash
-uvx fastmcp run backend/app/mcp/server.py:mcp
-```
-
-### Redis (Optional)
-
-Uncomment the redis service in `docker-compose.dev.yml`, then:
-
-```bash
-docker-compose -f docker-compose.dev.yml up -d
-```
-
-### Full Stack (Docker Compose)
-
-For production-like deployment with all services:
-
-```bash
-docker-compose up -d
-```
-
-This starts: Frontend (3000), Backend (8000), PostgreSQL (5432), Redis (6379)
-
-## Configuration
-
-### Environment Variables
-
-Create `backend/.env` from the example:
-
-```bash
-cp backend/.env.example backend/.env
-```
-
-**Required:**
-```bash
-# At least one LLM provider
-GOOGLE_API_KEY=your-gemini-api-key        # Recommended (default)
-# Or
-OPENAI_API_KEY=sk-...
-# Or
-ANTHROPIC_API_KEY=sk-ant-...
-# Or
-OLLAMA_BASE_URL=http://localhost:11434    # Self-hosted
-```
-
-**Optional:**
-```bash
-# Database (defaults work with docker-compose.dev.yml)
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/javapatching
-REDIS_URL=redis://localhost:6379
-
-# Auth
-SECRET_KEY=change-this-to-a-random-secret-key
-
-# LLM preference
-DEFAULT_LLM_PROVIDER=gemini   # gemini, openai, anthropic, ollama
-```
-
-### MCP Configuration
-
-The `mcp-config.json` in the project root configures Claude Code:
-
-```json
-{
-  "mcpServers": {
-    "java-patching": {
-      "command": "python",
-      "args": ["backend/mcp_server.py"],
-      "cwd": "${workspaceFolder}",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}/backend"
-      }
-    }
-  }
-}
-```
-
-For Claude Desktop, add to `~/.config/claude/claude_desktop_config.json`:
+Add to `~/.config/claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -266,110 +380,6 @@ For Claude Desktop, add to `~/.config/claude/claude_desktop_config.json`:
     }
   }
 }
-```
-
-## Available Agents
-
-### Analysis Agent
-
-Best for: Understanding upgrade impact before making changes
-
-| Action | Description |
-|--------|-------------|
-| `get_release_notes` | Fetch JDK release notes between versions |
-| `analyze_impact` | Full AST-based impact analysis against release notes |
-| `get_security_advisories` | Get CVEs fixed between versions |
-| `suggest_upgrade_path` | Recommend upgrade strategy (patch vs major) |
-
-**How it works:**
-1. Fetches changes from OpenJDK/Adoptium release notes
-2. Parses Java files using tree-sitter AST
-3. Matches code usage against deprecated/removed APIs
-4. Calculates risk score and severity
-5. Uses LLM to generate migration suggestions
-
-### Renovate Agent
-
-Best for: Patch-level upgrades within the same major version
-
-| Action | Description |
-|--------|-------------|
-| `detect_version` | Detect JDK version from pom.xml, build.gradle, .java-version, etc. |
-| `get_available_patches` | Query Adoptium API for newer patch versions |
-| `preview_version_bump` | Show diffs before applying changes |
-| `apply_version_bump` | Update version in build files |
-| `generate_config` | Create renovate.json for automated updates |
-
-### OpenRewrite Agent
-
-Best for: Major version migrations (8→11, 11→17, 17→21)
-
-| Action | Description |
-|--------|-------------|
-| `list_recipes` | List available migration recipes |
-| `analyze_migration` | Dry-run analysis of what would change |
-| `run_recipe` | Execute a transformation recipe |
-| `suggest_migration_path` | Recommend step-by-step upgrade path |
-| `scan_security` | OWASP Top 10 vulnerability scanning |
-
-**Available Recipes:**
-- `java8to11` - Java 8 → 11 migration
-- `java11to17` - Java 11 → 17 migration
-- `java17to21` - Java 17 → 21 migration
-- `jakarta_ee9` - javax.* → jakarta.* namespace
-- `spring_boot_3` - Spring Boot 2.x → 3.0
-- `junit5` - JUnit 4 → 5 migration
-- `security_fixes` - OWASP security fixes
-
-## Agents API
-
-All agents can be invoked via the REST API:
-
-```bash
-# List all agents
-curl http://localhost:8000/api/agents
-
-# Get agent details
-curl http://localhost:8000/api/agents/analysis
-
-# List agent actions
-curl http://localhost:8000/api/agents/analysis/actions
-
-# Execute an action
-curl -X POST http://localhost:8000/api/agents/analysis/execute/analyze_impact \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "repository_id": "uuid-here",
-    "parameters": {
-      "from_version": "11.0.18",
-      "to_version": "11.0.22"
-    }
-  }'
-
-# Health check all agents
-curl http://localhost:8000/api/agents/health
-
-# Get LLM tool definitions (for function calling)
-curl http://localhost:8000/api/agents/tools
-```
-
-### Automation API (Renovate-style shortcuts)
-
-```bash
-# Detect JDK version
-curl http://localhost:8000/api/automation/{repo_id}/jdk-version
-
-# Get available patches
-curl http://localhost:8000/api/automation/{repo_id}/available-patches
-
-# Preview version bump
-curl -X POST http://localhost:8000/api/automation/{repo_id}/preview-bump \
-  -d '{"target_version": "11.0.22"}'
-
-# Apply version bump
-curl -X POST http://localhost:8000/api/automation/{repo_id}/apply-bump \
-  -d '{"target_version": "11.0.22"}'
 ```
 
 ## Development
@@ -394,51 +404,54 @@ ruff format .
 
 ```bash
 cd backend
-
-# Create a new migration
-alembic revision --autogenerate -m "Description of changes"
-
-# Apply migrations
+alembic revision --autogenerate -m "Description"
 alembic upgrade head
-
-# Rollback one migration
-alembic downgrade -1
 ```
 
-### Adding a New Agent
+### Frontend Development
 
-1. Create `backend/app/agents/my_agent.py`:
-
-```python
-from app.agents.base import Agent, AgentAction, AgentCapability
-from app.agents.registry import register_agent
-
-@register_agent
-class MyAgent(Agent):
-    name = "my_agent"
-    description = "Does something useful"
-
-    @property
-    def capabilities(self) -> list[AgentCapability]:
-        return [AgentCapability.IMPACT_ANALYSIS]
-
-    @property
-    def actions(self) -> list[AgentAction]:
-        return [
-            AgentAction(
-                name="my_action",
-                description="Performs analysis",
-                parameters={"type": "object", "properties": {...}},
-            ),
-        ]
-
-    async def execute(self, action, context, **kwargs):
-        # Implementation
-        ...
+```bash
+cd frontend
+npm run dev      # Development server with hot reload
+npm run build    # Production build
+npm run preview  # Preview production build
 ```
 
-2. Import in `backend/app/agents/__init__.py`
-3. Add MCP tools in `backend/app/mcp/server.py`
+## Troubleshooting
+
+### Clone fails with SSH error
+
+If you only have SSH keys configured:
+- The application automatically converts HTTPS URLs to SSH format
+- Make sure your SSH key is added to the ssh-agent: `ssh-add ~/.ssh/id_rsa`
+
+### Tests fail with "mvn not found"
+
+Install Maven:
+```bash
+brew install maven  # macOS
+```
+
+### PR not created automatically
+
+Install GitHub CLI:
+```bash
+brew install gh
+gh auth login
+```
+
+Or use the manual PR URL provided in the response.
+
+### Frontend can't connect to backend
+
+Check that the backend is running on port 8000 and CORS is configured.
+
+### LLM errors
+
+Verify your API key is set correctly in `.env` and the provider is available:
+```bash
+curl http://localhost:8000/api/agents/llm/providers
+```
 
 ## Project Structure
 
@@ -446,53 +459,32 @@ class MyAgent(Agent):
 JavaPatching/
 ├── backend/
 │   ├── app/
-│   │   ├── agents/          # Multi-agent system
-│   │   ├── api/routes/      # REST API endpoints
-│   │   ├── core/            # Config, database, security
-│   │   ├── models/          # SQLAlchemy models
-│   │   ├── schemas/         # Pydantic schemas
-│   │   ├── services/        # Business logic
-│   │   ├── skills/          # Skill system
-│   │   └── mcp/             # FastMCP server
-│   ├── alembic/             # Database migrations
-│   ├── mcp_server.py        # MCP entry point
-│   └── pyproject.toml
-├── frontend/                 # React frontend
-├── docker-compose.yml        # Full stack deployment
+│   │   ├── agents/           # Multi-agent system
+│   │   │   ├── analysis_agent.py
+│   │   │   ├── fixer_agent.py
+│   │   │   ├── patcher_agent.py
+│   │   │   ├── renovate_agent.py
+│   │   │   ├── openrewrite_agent.py
+│   │   │   └── orchestrator_agent.py
+│   │   ├── api/routes/       # REST API endpoints
+│   │   ├── core/             # Config, database, security
+│   │   ├── models/           # SQLAlchemy models
+│   │   ├── schemas/          # Pydantic schemas
+│   │   ├── services/         # Business logic
+│   │   └── mcp/              # FastMCP server
+│   ├── alembic/              # Database migrations
+│   └── .env.example
+├── frontend/
+│   ├── src/
+│   │   ├── components/       # React components
+│   │   ├── hooks/            # Custom hooks
+│   │   ├── services/         # API client
+│   │   └── App.tsx
+│   └── package.json
+├── docker-compose.yml        # Full stack
 ├── docker-compose.dev.yml    # Development (DB only)
-├── mcp-config.json          # Claude Code MCP config
-└── ARCHITECTURE.md          # Detailed architecture docs
-```
-
-## Troubleshooting
-
-### MCP tools not appearing in Claude Code
-
-1. Ensure you're in the JavaPatching directory
-2. Check that `mcp-config.json` exists
-3. Restart Claude Code
-4. Verify Python path: `which python`
-
-### Database connection errors
-
-```bash
-# Check if PostgreSQL is running
-docker-compose -f docker-compose.dev.yml ps
-
-# Check logs
-docker-compose -f docker-compose.dev.yml logs db
-```
-
-### Alembic migration errors
-
-```bash
-# Check current revision
-alembic current
-
-# Reset to clean state (loses data)
-docker-compose -f docker-compose.dev.yml down -v
-docker-compose -f docker-compose.dev.yml up -d
-alembic upgrade head
+├── mcp-config.json           # Claude Code config
+└── README.md
 ```
 
 ## License

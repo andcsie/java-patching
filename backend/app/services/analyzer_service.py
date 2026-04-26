@@ -73,8 +73,9 @@ class AnalyzerService:
         from_version: str,
         to_version: str,
         llm_provider: str | None = None,
+        skip_llm: bool = False,
     ) -> AnalysisResult:
-        """Analyze a repository for JDK upgrade impacts."""
+        """Analyze a repository for JDK upgrade impacts using Code + Release Notes + LLM."""
         try:
             # 1. Scan for Java files
             logger.info(f"[Analyzer] Scanning for Java files in {repo_path}")
@@ -92,22 +93,37 @@ class AnalyzerService:
                     suggestions=None,
                 )
 
-            # 2. Fetch release notes for version range
+            # 2. Fetch release notes for version range (for context)
             logger.info(f"[Analyzer] Fetching release notes: {from_version} -> {to_version}")
-            changes = await release_notes_service.get_changes_between_versions(
+            release_notes_changes = await release_notes_service.get_changes_between_versions(
                 from_version,
                 to_version,
             )
-            logger.info(f"[Analyzer] Got {len(changes)} JDK changes to check against")
+            logger.info(f"[Analyzer] Got {len(release_notes_changes)} changes from release notes")
 
-            # 3. Analyze each file for impacts
-            logger.info("[Analyzer] Analyzing files for impacts...")
+            # 3. Analyze each file using LLM (Code + Release Notes + LLM)
+            logger.info("[Analyzer] Analyzing files with LLM...")
             all_impacts: list[ImpactItem] = []
-            for file_path in java_files:
-                file_impacts = await self._analyze_file(file_path, changes)
-                if file_impacts:
-                    logger.info(f"[Analyzer] {file_path.name}: {len(file_impacts)} impacts")
-                all_impacts.extend(file_impacts)
+
+            if skip_llm or not self.llm.available_providers:
+                # Fallback: basic AST matching only
+                logger.info("[Analyzer] LLM skipped - using AST matching only")
+                for file_path in java_files:
+                    file_impacts = await self._analyze_file_basic(file_path, release_notes_changes)
+                    all_impacts.extend(file_impacts)
+            else:
+                # Full analysis: send code to LLM with release notes context
+                for file_path in java_files:
+                    file_impacts = await self._analyze_file_with_llm(
+                        file_path,
+                        from_version,
+                        to_version,
+                        release_notes_changes,
+                        llm_provider,
+                    )
+                    if file_impacts:
+                        logger.info(f"[Analyzer] {file_path.name}: {len(file_impacts)} impacts")
+                    all_impacts.extend(file_impacts)
 
             logger.info(f"[Analyzer] Total impacts found: {len(all_impacts)}")
 
@@ -115,21 +131,8 @@ class AnalyzerService:
             risk_score, risk_level = self._calculate_risk_score(all_impacts)
             logger.info(f"[Analyzer] Risk score: {risk_score}, level: {risk_level}")
 
-            # 5. Generate suggestions using LLM (if available)
-            summary = None
-            suggestions = None
-            if all_impacts and self.llm.available_providers:
-                logger.info("[Analyzer] Generating LLM suggestions...")
-                try:
-                    summary, suggestions = await self._generate_suggestions(
-                        all_impacts,
-                        from_version,
-                        to_version,
-                        llm_provider,
-                    )
-                    logger.info("[Analyzer] LLM suggestions generated")
-                except Exception as e:
-                    logger.warning(f"[Analyzer] LLM suggestion failed: {e}")
+            # 5. Generate summary
+            summary = f"Found {len(all_impacts)} potential compatibility issues upgrading from JDK {from_version} to {to_version}."
 
             logger.info("[Analyzer] Analysis complete")
             return AnalysisResult(
@@ -139,7 +142,7 @@ class AnalyzerService:
                 risk_level=risk_level,
                 total_files_analyzed=len(java_files),
                 summary=summary,
-                suggestions=suggestions,
+                suggestions=None,
             )
 
         except Exception as e:
@@ -178,12 +181,185 @@ class AnalyzerService:
 
         return filtered
 
-    async def _analyze_file(
+    async def _analyze_file_with_llm(
+        self,
+        file_path: Path,
+        from_version: str,
+        to_version: str,
+        release_notes_changes: list[JDKChange],
+        llm_provider: str | None,
+    ) -> list[ImpactItem]:
+        """Analyze a file using LLM with code + release notes context (Hybrid approach)."""
+        import json
+
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except Exception:
+            return []
+
+        # Truncate large files
+        lines = content.split('\n')
+        if len(lines) > 150:
+            content = '\n'.join(lines[:150]) + f"\n... ({len(lines) - 150} more lines)"
+
+        # Build release notes context - group by type for clarity
+        release_context = ""
+        if release_notes_changes:
+            security_changes = [c for c in release_notes_changes if c.change_type == ChangeType.SECURITY]
+            behavioral_changes = [c for c in release_notes_changes if c.change_type == ChangeType.BEHAVIORAL]
+            other_changes = [c for c in release_notes_changes if c.change_type not in (ChangeType.SECURITY, ChangeType.BEHAVIORAL)]
+
+            parts = []
+            if security_changes:
+                parts.append("Security fixes:\n" + "\n".join(f"- {c.description[:150]}" for c in security_changes[:5]))
+            if behavioral_changes:
+                parts.append("Behavioral changes:\n" + "\n".join(f"- {c.description[:150]}" for c in behavioral_changes[:5]))
+            if other_changes[:3]:
+                parts.append("Other changes:\n" + "\n".join(f"- {c.description[:100]}" for c in other_changes[:3]))
+
+            if parts:
+                release_context = "\n\n".join(parts)
+                logger.info(f"[Analyzer] Release notes context: {len(security_changes)} security, {len(behavioral_changes)} behavioral, {len(other_changes)} other")
+            else:
+                logger.info("[Analyzer] No release notes - LLM will use its knowledge only")
+        else:
+            logger.info("[Analyzer] No release notes fetched - LLM will use its knowledge only")
+
+        # Hybrid prompt: LLM knowledge + release notes
+        messages = [
+            {
+                "role": "system",
+                "content": f"""Analyze Java code for JDK {from_version} to {to_version} upgrade issues.
+Use your knowledge of JDK changes plus any release notes provided.
+Return ONLY a JSON array. No explanation. Example format:
+[{{"line":59,"code":"setEnabledProtocols","issue":"TLS 1.0/1.1 disabled in 11.0.19+","severity":"high","category":"security"}}]
+Return [] if no issues.""",
+            },
+            {
+                "role": "user",
+                "content": f"""Release notes: {release_context[:500] if release_context else "Use JDK knowledge."}
+
+{file_path.name}:
+{content}
+
+JSON:""",
+            },
+        ]
+
+        try:
+            response = await self.llm.complete(messages, llm_provider, temperature=0.1, max_tokens=2048)
+            logger.debug(f"[Analyzer] LLM response: {response[:500]}...")
+
+            # Parse response - handle various formats
+            response = response.strip()
+
+            # Remove markdown code blocks
+            response = re.sub(r"```(?:json)?\s*", "", response)
+            response = re.sub(r"```\s*$", "", response)
+            response = response.strip()
+
+            # Try to find JSON array in response
+            array_match = re.search(r'\[[\s\S]*\]', response)
+            if array_match:
+                response = array_match.group(0)
+
+            # Fix common JSON issues from LLMs
+            # Replace newlines inside strings with escaped newlines
+            # This is a simple heuristic - find strings and escape newlines in them
+            def fix_json_strings(text):
+                # Replace literal newlines with \n in JSON strings
+                result = []
+                in_string = False
+                escape_next = False
+                for char in text:
+                    if escape_next:
+                        result.append(char)
+                        escape_next = False
+                    elif char == '\\':
+                        result.append(char)
+                        escape_next = True
+                    elif char == '"':
+                        result.append(char)
+                        in_string = not in_string
+                    elif char == '\n' and in_string:
+                        result.append('\\n')
+                    else:
+                        result.append(char)
+                return ''.join(result)
+
+            response = fix_json_strings(response)
+
+            try:
+                issues = json.loads(response)
+            except json.JSONDecodeError:
+                # Try to extract individual issue objects
+                logger.warning(f"[Analyzer] JSON parse failed, trying fallback extraction")
+                issues = []
+                # Find all {...} objects
+                for obj_match in re.finditer(r'\{[^{}]+\}', response):
+                    try:
+                        obj_text = fix_json_strings(obj_match.group(0))
+                        obj = json.loads(obj_text)
+                        if "line" in obj or "issue" in obj:
+                            issues.append(obj)
+                    except:
+                        pass
+                if not issues:
+                    logger.warning(f"[Analyzer] Could not parse any issues from response")
+                    return []
+
+            # Convert to ImpactItems
+            impacts = []
+            for issue in issues:
+                if not isinstance(issue, dict):
+                    continue
+
+                severity_map = {
+                    "high": RiskLevel.HIGH,
+                    "critical": RiskLevel.CRITICAL,
+                    "medium": RiskLevel.MEDIUM,
+                    "low": RiskLevel.LOW,
+                }
+                category_map = {
+                    "security": ChangeType.SECURITY,
+                    "deprecated": ChangeType.DEPRECATED,
+                    "behavioral": ChangeType.BEHAVIORAL,
+                    "removed": ChangeType.REMOVED,
+                }
+
+                impacts.append(ImpactItem(
+                    location=CodeLocation(
+                        file_path=str(file_path),
+                        line_number=issue.get("line", 0),
+                        column_number=0,
+                        code_snippet=issue.get("code", "")[:150],
+                    ),
+                    change=JDKChange(
+                        version=to_version,
+                        change_type=category_map.get(issue.get("category", ""), ChangeType.BEHAVIORAL),
+                        component="",
+                        description=issue.get("issue", ""),
+                        affected_classes=[],
+                        affected_methods=[],
+                    ),
+                    severity=severity_map.get(issue.get("severity", "medium"), RiskLevel.MEDIUM),
+                    affected_class=None,
+                    affected_method=None,
+                ))
+
+            return impacts
+
+        except Exception as e:
+            logger.warning(f"[Analyzer] LLM analysis failed for {file_path.name}: {e}")
+            # Fallback to basic analysis
+            return await self._analyze_file_basic(file_path, release_notes_changes)
+
+    async def _analyze_file_basic(
         self,
         file_path: Path,
         changes: list[JDKChange],
     ) -> list[ImpactItem]:
-        """Analyze a single Java file for impacts."""
+        """Basic AST-based analysis without LLM (fallback)."""
         impacts: list[ImpactItem] = []
 
         try:
@@ -195,31 +371,11 @@ class AnalyzerService:
         parser = self._get_parser()
         tree = parser.parse(content.encode())
 
-        # Extract imports, class usages, and method calls
-        imports = self._extract_imports(tree, content)
+        # Extract actual code usages only
         usages = self._extract_usages(tree, content)
 
-        # Match against changes
+        # Match against changes from release notes
         for change in changes:
-            # Check imports
-            for imp in imports:
-                if self._matches_change(imp["name"], change):
-                    impacts.append(
-                        ImpactItem(
-                            location=CodeLocation(
-                                file_path=str(file_path),
-                                line_number=imp["line"],
-                                column_number=imp["column"],
-                                code_snippet=imp["code"],
-                            ),
-                            change=change,
-                            severity=self._get_severity(change),
-                            affected_class=imp["name"],
-                            affected_method=None,
-                        )
-                    )
-
-            # Check usages
             for usage in usages:
                 if self._matches_change(usage["name"], change):
                     impacts.append(
@@ -237,16 +393,11 @@ class AnalyzerService:
                         )
                     )
 
-        # Deduplicate impacts by (file, line, affected_class/method)
+        # Deduplicate
         seen = set()
         unique_impacts = []
         for impact in impacts:
-            key = (
-                impact.location.file_path,
-                impact.location.line_number,
-                impact.affected_class or "",
-                impact.affected_method or "",
-            )
+            key = (impact.location.file_path, impact.location.line_number)
             if key not in seen:
                 seen.add(key)
                 unique_impacts.append(impact)
@@ -276,11 +427,21 @@ class AnalyzerService:
         return imports
 
     def _extract_usages(self, tree, content: str) -> list[dict]:
-        """Extract class and method usages from AST."""
+        """Extract class and method usages from AST - focus on actual code, not declarations."""
         usages = []
 
+        def get_parent_type(node):
+            """Get the parent node type to understand context."""
+            parent = node.parent
+            while parent:
+                if parent.type in ("method_declaration", "formal_parameter", "field_declaration",
+                                   "local_variable_declaration", "import_declaration"):
+                    return parent.type
+                parent = parent.parent
+            return None
+
         def visit(node):
-            # Method invocations
+            # Method invocations - these are actual code usage
             if node.type == "method_invocation":
                 method_name = None
                 class_name = None
@@ -290,6 +451,9 @@ class AnalyzerService:
                         method_name = content[child.start_byte : child.end_byte]
                     elif child.type == "field_access":
                         class_name = content[child.start_byte : child.end_byte]
+                    elif child.type == "identifier" and class_name is None:
+                        # Could be the object/class being called on
+                        pass
 
                 if method_name:
                     usages.append({
@@ -299,21 +463,26 @@ class AnalyzerService:
                         "code": content[node.start_byte : node.end_byte][:100],
                         "class": class_name,
                         "method": method_name,
+                        "context": "method_call",
                     })
 
-            # Type references (class instantiation, variable declarations)
-            elif node.type == "type_identifier":
-                type_name = content[node.start_byte : node.end_byte]
-                usages.append({
-                    "name": type_name,
-                    "line": node.start_point[0] + 1,
-                    "column": node.start_point[1],
-                    "code": content[
-                        max(0, node.start_byte - 20) : min(len(content), node.end_byte + 20)
-                    ],
-                    "class": type_name,
-                    "method": None,
-                })
+            # Object creation expressions - actual instantiation
+            elif node.type == "object_creation_expression":
+                for child in node.children:
+                    if child.type == "type_identifier":
+                        type_name = content[child.start_byte : child.end_byte]
+                        usages.append({
+                            "name": type_name,
+                            "line": node.start_point[0] + 1,
+                            "column": node.start_point[1],
+                            "code": content[node.start_byte : node.end_byte][:100],
+                            "class": type_name,
+                            "method": "new",
+                            "context": "instantiation",
+                        })
+
+            # Skip type_identifier in declarations - they're not the actual problem
+            # We only care about instantiations and method calls
 
             for child in node.children:
                 visit(child)

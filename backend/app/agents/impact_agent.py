@@ -105,6 +105,8 @@ class ImpactAgent(Agent):
         repo_path = Path(kwargs["repository_path"])
         from_version = kwargs["from_version"]
         to_version = kwargs["to_version"]
+        llm_provider = kwargs.get("llm_provider")
+        skip_llm = kwargs.get("skip_llm", False)
 
         logger.info(f"[Impact] Analyzing: {repo_path}")
         logger.info(f"[Impact] Versions: {from_version} -> {to_version}")
@@ -113,6 +115,8 @@ class ImpactAgent(Agent):
             repo_path,
             from_version,
             to_version,
+            llm_provider=llm_provider,
+            skip_llm=skip_llm,
         )
 
         if result.error_message:

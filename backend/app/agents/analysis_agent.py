@@ -230,6 +230,8 @@ class AnalysisAgent(Agent):
             repo_path,
             from_version,
             to_version,
+            llm_provider=llm_provider,
+            skip_llm=skip_llm,
         )
         logger.info(f"[AnalysisAgent] Analysis complete: {len(result.impacts)} impacts, risk_score={result.risk_score}")
 

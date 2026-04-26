@@ -81,8 +81,16 @@ class RepositoryService:
         if repo.local_path:
             await self._cleanup_local_clone(repo.local_path)
 
-    async def clone(self, repo: Repository) -> str:
-        """Clone a repository to local storage."""
+    async def clone(self, repo: Repository, use_ssh: bool = True) -> str:
+        """Clone a repository to local storage.
+
+        Args:
+            repo: Repository to clone
+            use_ssh: If True, convert HTTPS URLs to SSH format (default: True)
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
         # Check if URL is a local path (file:// or absolute path)
         if repo.url.startswith("file://"):
             local_path = repo.url[7:]  # Strip file://
@@ -101,27 +109,84 @@ class RepositoryService:
             else:
                 raise ValueError(f"Local path does not exist: {repo.url}")
 
+        # Convert HTTPS to SSH if requested
+        clone_url = repo.url
+        if use_ssh:
+            clone_url = self._convert_to_ssh_url(repo.url)
+            logger.info(f"Using SSH URL: {clone_url}")
+
         # Regular git clone
         local_path = self.repos_base_path / str(repo.owner_id) / str(repo.id)
 
         # Ensure parent directory exists
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
+        logger.info(f"Cloning {clone_url} to {local_path}")
+
         # Clone in a thread pool to avoid blocking
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            self._clone_sync,
-            repo.url,
-            local_path,
-            repo.branch,
-        )
+        try:
+            await loop.run_in_executor(
+                None,
+                self._clone_sync,
+                clone_url,
+                local_path,
+                repo.branch,
+            )
+        except Exception as e:
+            logger.error(f"Clone failed: {e}")
+            # If SSH failed and we converted, try original URL
+            if use_ssh and clone_url != repo.url:
+                logger.info(f"SSH clone failed, trying original URL: {repo.url}")
+                await loop.run_in_executor(
+                    None,
+                    self._clone_sync,
+                    repo.url,
+                    local_path,
+                    repo.branch,
+                )
+            else:
+                raise
 
         # Update repository with local path
         repo.local_path = str(local_path)
         await self.db.commit()
 
         return str(local_path)
+
+    def _convert_to_ssh_url(self, url: str) -> str:
+        """Convert HTTPS URL to SSH URL format."""
+        import re
+
+        # Already SSH format
+        if url.startswith("git@"):
+            return url
+
+        # GitHub HTTPS to SSH
+        # https://github.com/user/repo.git -> git@github.com:user/repo.git
+        match = re.match(r'https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?$', url)
+        if match:
+            return f"git@github.com:{match.group(1)}/{match.group(2)}.git"
+
+        # Bitbucket HTTPS to SSH
+        # https://bitbucket.org/user/repo.git -> git@bitbucket.org:user/repo.git
+        match = re.match(r'https?://bitbucket\.org/([^/]+)/([^/]+?)(?:\.git)?$', url)
+        if match:
+            return f"git@bitbucket.org:{match.group(1)}/{match.group(2)}.git"
+
+        # GitLab HTTPS to SSH
+        # https://gitlab.com/user/repo.git -> git@gitlab.com:user/repo.git
+        match = re.match(r'https?://gitlab\.com/([^/]+)/([^/]+?)(?:\.git)?$', url)
+        if match:
+            return f"git@gitlab.com:{match.group(1)}/{match.group(2)}.git"
+
+        # Generic: try to convert any https://host/path to git@host:path
+        match = re.match(r'https?://([^/]+)/(.+?)(?:\.git)?$', url)
+        if match:
+            return f"git@{match.group(1)}:{match.group(2)}.git"
+
+        # Return original if can't convert
+        return url
 
     def _clone_sync(self, url: str, local_path: Path, branch: str) -> None:
         """Synchronous clone operation."""

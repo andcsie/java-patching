@@ -177,7 +177,7 @@ class AnthropicProvider(LLMProvider):
 class GeminiProvider(LLMProvider):
     """Google Gemini API provider."""
 
-    def __init__(self, api_key: str, model: str = "gemini-1.5-pro"):
+    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
         self.api_key = api_key
         self.model = model
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
@@ -372,24 +372,30 @@ class LLMService:
                 settings.openai_api_key,
                 settings.openai_model,
             )
+            logger.info(f"[LLM] Initialized OpenAI provider with model: {settings.openai_model}")
 
         if settings.anthropic_api_key:
             self.providers["anthropic"] = AnthropicProvider(
                 settings.anthropic_api_key,
                 settings.anthropic_model,
             )
+            logger.info(f"[LLM] Initialized Anthropic provider with model: {settings.anthropic_model}")
 
         if settings.google_api_key:
             self.providers["gemini"] = GeminiProvider(
                 settings.google_api_key,
                 settings.google_model,
             )
+            logger.info(f"[LLM] Initialized Gemini provider with model: {settings.google_model}")
 
         if settings.ollama_base_url:
             self.providers["ollama"] = OllamaProvider(
                 settings.ollama_base_url,
                 settings.ollama_model,
             )
+            logger.info(f"[LLM] Initialized Ollama provider with model: {settings.ollama_model}")
+
+        logger.info(f"[LLM] Available providers: {list(self.providers.keys())}, default: {settings.default_llm_provider}")
 
     @property
     def available_providers(self) -> list[str]:
@@ -583,77 +589,79 @@ Explain the impact on this code.""",
         provider: str | None = None,
     ) -> dict:
         """Generate a code fix for an impacted code pattern."""
-        # Truncate inputs to avoid token limits
-        code_snippet = code_snippet[:500] if code_snippet else ""
-        change_description = change_description[:500] if change_description else ""
+        import json
+        import re
 
-        context = ""
-        if full_file_content:
-            # Include minimal context - just imports and class signature
-            lines = full_file_content.split('\n')
-            context_lines = []
-            for line in lines[:50]:  # First 50 lines usually has imports + class def
-                if line.strip().startswith('import ') or line.strip().startswith('package ') or 'class ' in line:
-                    context_lines.append(line)
-            if context_lines:
-                context = f"\n\nFile context:\n```java\n{chr(10).join(context_lines)}\n```"
+        code_snippet = (code_snippet or "")[:150]
+        change_description = (change_description or "")[:100]
 
         messages = [
             {
                 "role": "system",
-                "content": """You are an expert Java developer fixing code for JDK compatibility.
+                "content": """Fix Java code for JDK compatibility. Return JSON:
+{"fixed_code": "COMPLETE LINE HERE", "explanation": "brief explanation"}
 
-Generate a fix for the impacted code. Provide your response as JSON:
-{
-  "fixed_code": "The corrected Java code snippet",
-  "explanation": "Brief explanation of what was changed and why",
-  "imports_needed": ["any.new.imports.Required"],
-  "breaking_change": true/false,
-  "test_suggestion": "How to test this change"
-}
-
-Rules:
-- Maintain the same functionality
-- Use modern Java idioms appropriate for the target JDK
-- Prefer standard library over external dependencies
-- Keep the fix minimal - don't refactor unrelated code""",
+IMPORTANT: fixed_code must be the COMPLETE LINE of code that will REPLACE the original line.
+- Include the FULL statement (method call, assignment, etc.)
+- Include the semicolon at the end
+- Keep it on ONE LINE
+- Do NOT include just a partial snippet""",
             },
             {
                 "role": "user",
-                "content": f"""File: {file_path}
-
-Original code with issue:
-```java
-{code_snippet}
-```
-
-JDK Change ({change_type}):
-{change_description}{context}
-
-Generate a fix.""",
+                "content": f"Fix this {change_type} issue:\nOriginal line: {code_snippet}\nProblem: {change_description}\n\nReturn the COMPLETE fixed line that replaces the original.",
             },
         ]
 
-        response = await self.complete(messages, provider, temperature=0.2)
+        response = await self.complete(messages, provider, temperature=0.1, max_tokens=1024)
+        logger.debug(f"[LLM] generate_fix response: {response[:300]}")
 
-        # Parse JSON response
-        import json
-        import re
+        # Clean response
+        response = response.strip()
+        response = re.sub(r"```(?:json)?\s*", "", response)
+        response = re.sub(r"```\s*$", "", response)
+        response = response.strip()
 
-        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response, re.DOTALL)
-        if json_match:
-            response = json_match.group(1)
-
+        # Try direct JSON parse first
         try:
-            return json.loads(response)
+            result = json.loads(response)
+            if "fixed_code" in result and result["fixed_code"]:
+                return result
         except json.JSONDecodeError:
-            return {
-                "fixed_code": code_snippet,
-                "explanation": response,
-                "imports_needed": [],
-                "breaking_change": False,
-                "test_suggestion": "Manual review required",
-            }
+            pass
+
+        # Try to find JSON object in response
+        json_match = re.search(r'\{[\s\S]*"fixed_code"[\s\S]*\}', response)
+        if json_match:
+            try:
+                # Fix newlines in strings
+                json_str = json_match.group(0)
+                # Replace actual newlines with \n in string values
+                json_str = re.sub(r':\s*"([^"]*)\n([^"]*)"', r': "\1\\n\2"', json_str)
+                result = json.loads(json_str)
+                if "fixed_code" in result:
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        # Fallback: extract values with regex
+        # Handle escaped quotes in the value
+        fixed_match = re.search(r'"fixed_code"\s*:\s*"((?:[^"\\]|\\.)*)"', response, re.DOTALL)
+        explanation_match = re.search(r'"explanation"\s*:\s*"((?:[^"\\]|\\.)*)"', response, re.DOTALL)
+
+        fixed_code = fixed_match.group(1) if fixed_match else code_snippet
+        explanation = explanation_match.group(1) if explanation_match else "Fix applied"
+
+        # Unescape the extracted values
+        fixed_code = fixed_code.replace('\\"', '"').replace('\\n', '\n')
+        explanation = explanation.replace('\\"', '"').replace('\\n', ' ')
+
+        return {
+            "fixed_code": fixed_code if fixed_code else code_snippet,
+            "explanation": explanation,
+            "imports_needed": [],
+            "breaking_change": False,
+        }
 
     async def generate_patch(
         self,
@@ -662,110 +670,114 @@ Generate a fix.""",
         impacts_with_fixes: list[dict],
         provider: str | None = None,
     ) -> dict:
-        """Generate a unified diff patch for a file with multiple fixes."""
-        # Extract fix data - handle nested 'fix' structure from fixer agent
-        def extract_fix_info(impact: dict) -> str:
+        """Generate a unified diff patch programmatically from fixes."""
+        import difflib
+
+        # Extract fix data from impacts
+        def get_fix_data(impact: dict) -> tuple[int, str, str, str] | None:
+            """Returns (line_number, original_code, fixed_code, explanation) or None."""
             fix_data = impact.get("fix", {})
-            if isinstance(fix_data, dict) and not fix_data.get("error"):
-                fixed_code = fix_data.get("fixed_code", "N/A")
-                explanation = fix_data.get("explanation", "N/A")
-            else:
-                # Fallback to flat structure
-                fixed_code = impact.get("fixed_code", "N/A")
-                explanation = impact.get("explanation", "N/A")
+            if isinstance(fix_data, dict) and fix_data.get("error"):
+                return None
+            if not isinstance(fix_data, dict):
+                return None
 
-            return (
-                f"Line {impact.get('line_number', '?')}:\n"
-                f"Original code: {impact.get('code_snippet', 'N/A')[:200]}\n"
-                f"Fixed code: {fixed_code}\n"
-                f"Reason: {explanation}"
-            )
+            fixed_code = fix_data.get("fixed_code", "")
+            explanation = fix_data.get("explanation", "")
+            if not fixed_code:
+                return None
 
-        fixes_description = "\n\n".join(
-            extract_fix_info(fix) for fix in impacts_with_fixes
-            if fix.get("fix") and not fix.get("fix", {}).get("error")
-        )
+            line_num = impact.get("line_number", 0)
+            original = impact.get("code_snippet", "")
+            return (line_num, original, fixed_code, explanation)
 
-        if not fixes_description.strip():
+        # Collect valid fixes
+        valid_fixes = []
+        for impact in impacts_with_fixes:
+            fix_data = get_fix_data(impact)
+            if fix_data:
+                valid_fixes.append(fix_data)
+
+        if not valid_fixes:
             return {
-                "patched_content": original_content,
                 "unified_diff": "",
                 "changes_summary": ["No valid fixes to apply"],
                 "warnings": ["All fixes had errors or were empty"],
             }
 
-        # Truncate original content to avoid token limits - just show relevant sections
+        # Sort by line number
+        valid_fixes.sort(key=lambda x: x[0])
+
+        # Apply fixes to content
         content_lines = original_content.split('\n')
-        truncated_content = '\n'.join(content_lines[:100])  # First 100 lines
-        if len(content_lines) > 100:
-            truncated_content += f"\n... ({len(content_lines) - 100} more lines)"
+        patched_lines = content_lines.copy()
+        changes_summary = []
+        warnings = []
 
-        messages = [
-            {
-                "role": "system",
-                "content": """You are a code patch generator. Create a unified diff that applies fixes to a Java file.
+        # Track line offset as we make changes
+        offset = 0
+        for line_num, original_code, fixed_code, explanation in valid_fixes:
+            idx = line_num - 1 + offset  # Convert to 0-indexed with offset
 
-Provide your response as JSON:
-{
-  "unified_diff": "--- a/File.java\\n+++ b/File.java\\n@@ -10,5 +10,6 @@\\n context\\n-old line\\n+new line\\n context",
-  "changes_summary": ["List of changes made"],
-  "warnings": ["Any warnings"]
-}
+            if idx < 0 or idx >= len(patched_lines):
+                warnings.append(f"Line {line_num} out of range")
+                continue
 
-Rules:
-- Generate ONLY the unified diff, not the full file
-- Use proper unified diff format with @@ line numbers
-- Each hunk should have 2-3 lines of context""",
-            },
-            {
-                "role": "user",
-                "content": f"""File: {file_path}
+            current_line = patched_lines[idx]
 
-File preview (first 100 lines):
-```java
-{truncated_content}
-```
+            # Get the fixed code - always do full line replacement to avoid corruption
+            fixed_stripped = fixed_code.strip()
 
-Fixes to apply:
-{fixes_description}
+            if not fixed_stripped:
+                warnings.append(f"Line {line_num}: Empty fix, skipping")
+                continue
 
-Generate ONLY the unified diff patch (not the full file).""",
-            },
-        ]
+            # Preserve original indentation
+            indent = len(current_line) - len(current_line.lstrip())
+            indent_str = current_line[:indent]
 
-        response = await self.complete(messages, provider, temperature=0.1, max_tokens=4096)
+            # Handle multi-line fixes
+            fixed_lines = fixed_stripped.split('\n')
+            if len(fixed_lines) == 1:
+                # Single line fix - replace the entire line preserving indentation
+                # But if fixed_code already has proper indentation/structure, use it directly
+                if fixed_stripped.startswith(current_line.lstrip()[:20]) or ';' in fixed_stripped:
+                    # Fixed code looks complete - use it with indentation
+                    patched_lines[idx] = indent_str + fixed_stripped
+                else:
+                    # Fixed code might be partial - be cautious
+                    patched_lines[idx] = indent_str + fixed_stripped
+                changes_summary.append(f"L{line_num}: {explanation[:100]}" if explanation else f"L{line_num}: Replaced line")
+            else:
+                # Multi-line: replace current line with multiple lines
+                new_lines = [indent_str + fl.strip() for fl in fixed_lines if fl.strip()]
+                patched_lines[idx:idx+1] = new_lines
+                offset += len(new_lines) - 1
+                changes_summary.append(f"L{line_num}: Multi-line fix ({len(new_lines)} lines)")
 
-        # Parse JSON response
-        import json
-        import re
+        # Generate unified diff
+        original_name = f"a/{file_path.split('/')[-1]}"
+        patched_name = f"b/{file_path.split('/')[-1]}"
 
-        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response, re.DOTALL)
-        if json_match:
-            response = json_match.group(1)
+        diff = difflib.unified_diff(
+            content_lines,
+            patched_lines,
+            fromfile=original_name,
+            tofile=patched_name,
+            lineterm='',
+        )
 
-        try:
-            result = json.loads(response)
-            # Ensure required fields
-            if "unified_diff" not in result:
-                result["unified_diff"] = ""
-            if "changes_summary" not in result:
-                result["changes_summary"] = []
-            if "warnings" not in result:
-                result["warnings"] = []
-            return result
-        except json.JSONDecodeError:
-            # Try to extract diff directly from response
-            if "---" in response and "+++" in response:
-                return {
-                    "unified_diff": response,
-                    "changes_summary": ["Extracted diff from response"],
-                    "warnings": [],
-                }
-            return {
-                "unified_diff": "",
-                "changes_summary": ["Failed to generate patch - manual review required"],
-                "warnings": [response[:300]],
-            }
+        unified_diff = '\n'.join(diff)
+
+        # Also return the full patched content for direct file writing
+        patched_content = '\n'.join(patched_lines)
+
+        return {
+            "unified_diff": unified_diff,
+            "patched_content": patched_content,
+            "changes_summary": changes_summary,
+            "warnings": warnings,
+        }
 
 
 # Global instance
